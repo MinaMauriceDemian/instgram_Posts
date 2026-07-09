@@ -24,7 +24,7 @@ import json
 import threading
 import queue
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, simpledialog
+from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk
 
 # Make sure we can import the processing functions regardless of how the
@@ -335,8 +335,55 @@ class App(tk.Tk):
         self.logo_pos = list(p.get("position", [0.90, 0.90]))
         self._refresh_preview()
 
+    def _ask_preset_name(self):
+        """
+        A small custom "type a name" popup, used instead of tkinter's
+        built-in simpledialog — on some Windows setups (high DPI / display
+        scaling), simpledialog's window renders too small and its OK
+        button ends up clipped off-screen. This version has a fixed,
+        generous size so that can't happen.
+        """
+        result = {"value": None}
+
+        dialog = tk.Toplevel(self)
+        dialog.title("Save Preset")
+        dialog.geometry("360x150")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ttk.Label(dialog, text="Preset name (e.g. 'Brand A'):").pack(padx=16, pady=(20, 6), anchor="w")
+        name_var = tk.StringVar()
+        entry = ttk.Entry(dialog, textvariable=name_var, width=40)
+        entry.pack(padx=16, pady=(0, 16), fill="x")
+        entry.focus_set()
+
+        def on_ok(event=None):
+            result["value"] = name_var.get().strip()
+            dialog.destroy()
+
+        def on_cancel(event=None):
+            dialog.destroy()
+
+        button_row = ttk.Frame(dialog)
+        button_row.pack(pady=(0, 10))
+        ttk.Button(button_row, text="OK", command=on_ok).pack(side="left", padx=6)
+        ttk.Button(button_row, text="Cancel", command=on_cancel).pack(side="left", padx=6)
+
+        entry.bind("<Return>", on_ok)
+        dialog.bind("<Escape>", on_cancel)
+
+        # Center the dialog over the main window
+        self.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() // 2) - 180
+        y = self.winfo_y() + (self.winfo_height() // 2) - 75
+        dialog.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+        dialog.wait_window()
+        return result["value"]
+
     def _save_preset(self):
-        name = simpledialog.askstring("Save Preset", "Preset name (e.g. 'Brand A'):", parent=self)
+        name = self._ask_preset_name()
         if not name:
             return
         self.presets[name] = {

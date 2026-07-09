@@ -1,0 +1,19 @@
+{
+  "paths": {
+    "input": "C:/Users/m.malik/Downloads/Instagram_files/Egy_Australia_match/photo_2026-07-05_10-32-34.jpg",
+    "logo": "C:/Users/m.malik/Downloads/Instagram_files/logo.png",
+    "output": "C:/Users/m.malik/Downloads/Instagram_files/Egy_Australia_match/output/1.jpg"
+  },
+  "mode": "single",
+  "crop_format": "square",
+  "crop_focus": "center",
+  "logo_scale": 0.15,
+  "opacity": 1.0,
+  "white_border": false,
+  "position": [
+    0.9,
+    0.9
+  ],
+  "presets": {},
+  "last_preset": ""
+}
