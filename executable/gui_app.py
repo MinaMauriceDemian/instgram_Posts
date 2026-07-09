@@ -35,7 +35,7 @@ try:
     from instagram_logo_tool import (
         process_photo,
         batch_process,
-        build_preview,
+        build_preview_with_overlay,
         create_test_logo,
         NAMED_POSITIONS,
         IMAGE_EXTENSIONS,
@@ -140,6 +140,8 @@ class App(tk.Tk):
         self._preview_photo_ref = None
         self._preview_offset = (0, 0)
         self._preview_disp_size = (0, 0)
+        self._preview_img_size = (0, 0)
+        self._crop_rect = (0, 0, 0, 0)
 
         self.mode = tk.StringVar(value=self.config_data.get("mode", "batch"))
 
@@ -448,7 +450,7 @@ class App(tk.Tk):
         logo_path = self.logo_var.get().strip() or None
 
         try:
-            img = build_preview(
+            img, crop_rect = build_preview_with_overlay(
                 self._preview_source,
                 logo_path=logo_path,
                 crop_format=crop_format,
@@ -466,6 +468,7 @@ class App(tk.Tk):
             )
             return
 
+        self._crop_rect = crop_rect  # (left, top, w, h) in img's own pixel space
         self._render_preview(img)
 
     def _render_preview(self, pil_img):
@@ -488,6 +491,7 @@ class App(tk.Tk):
 
         self._preview_offset = offset
         self._preview_disp_size = (dw, dh)
+        self._preview_img_size = pil_img.size  # native size of img, before canvas-fit scaling
 
     def _on_canvas_drag(self, event):
         if self._preview_source is None:
@@ -496,8 +500,16 @@ class App(tk.Tk):
         if dw == 0 or dh == 0:
             return
         ox, oy = self._preview_offset
-        x_frac = (event.x - ox) / dw
-        y_frac = (event.y - oy) / dh
+        iw, ih = self._preview_img_size
+        crop_left, crop_top, crop_w, crop_h = getattr(self, "_crop_rect", (0, 0, iw, ih))
+        if crop_w == 0 or crop_h == 0:
+            return
+
+        # canvas pixel -> preview image's own pixel coords -> fraction within crop box
+        img_x = (event.x - ox) * (iw / dw)
+        img_y = (event.y - oy) * (ih / dh)
+        x_frac = (img_x - crop_left) / crop_w
+        y_frac = (img_y - crop_top) / crop_h
         x_frac = min(max(x_frac, 0.0), 1.0)
         y_frac = min(max(y_frac, 0.0), 1.0)
         self.logo_pos = [x_frac, y_frac]

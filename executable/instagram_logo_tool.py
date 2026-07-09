@@ -56,6 +56,36 @@ DEFAULT_POSITION = NAMED_POSITIONS["bottom-right"]
 # ---------------------------------------------------------------------------
 # CROPPING
 # ---------------------------------------------------------------------------
+def compute_crop_box(width, height, fmt, focus="center"):
+    """
+    Work out the crop rectangle (left, top, right, bottom), in the given
+    width/height's own pixel coordinates, for a given Instagram format,
+    without actually cropping anything. Shared by the real crop function
+    and the preview overlay.
+    """
+    if fmt not in INSTAGRAM_FORMATS:
+        raise ValueError(f"Unknown format '{fmt}'. Choose from {list(INSTAGRAM_FORMATS)}")
+
+    target_ratio = INSTAGRAM_FORMATS[fmt]["ratio"]
+    current_ratio = width / height
+
+    if current_ratio > target_ratio:
+        # Image is too wide -> crop the sides
+        new_width = int(height * target_ratio)
+        left = (width - new_width) // 2
+        return (left, 0, left + new_width, height)
+    else:
+        # Image is too tall -> crop top/bottom
+        new_height = int(width / target_ratio)
+        if focus == "top":
+            top = 0
+        elif focus == "bottom":
+            top = height - new_height
+        else:  # center
+            top = (height - new_height) // 2
+        return (0, top, width, top + new_height)
+
+
 def crop_to_instagram_format(image, fmt="square", focus="center"):
     """
     Crop a PIL image (RGB/RGBA) to a given Instagram aspect ratio and resize
@@ -70,34 +100,65 @@ def crop_to_instagram_format(image, fmt="square", focus="center"):
     Returns:
         Cropped + resized PIL.Image, ready to save.
     """
-    if fmt not in INSTAGRAM_FORMATS:
-        raise ValueError(f"Unknown format '{fmt}'. Choose from {list(INSTAGRAM_FORMATS)}")
-
-    target_ratio = INSTAGRAM_FORMATS[fmt]["ratio"]
     target_size = INSTAGRAM_FORMATS[fmt]["size"]
-
-    width, height = image.size
-    current_ratio = width / height
-
-    if current_ratio > target_ratio:
-        # Image is too wide -> crop the sides
-        new_width = int(height * target_ratio)
-        left = (width - new_width) // 2
-        box = (left, 0, left + new_width, height)
-    else:
-        # Image is too tall -> crop top/bottom
-        new_height = int(width / target_ratio)
-        if focus == "top":
-            top = 0
-        elif focus == "bottom":
-            top = height - new_height
-        else:  # center
-            top = (height - new_height) // 2
-        box = (0, top, width, top + new_height)
-
+    box = compute_crop_box(image.width, image.height, fmt, focus)
     cropped = image.crop(box)
     resized = cropped.resize(target_size, Image.Resampling.LANCZOS)
     return resized
+
+
+def _prepare_logo(logo_path, target_width, opacity=1.0, white_border=False):
+    """
+    Load a logo, resize it to target_width (keeping aspect ratio), apply
+    opacity, and optionally add a white border/plate. Shared by add_logo()
+    and the preview overlay so both stay visually identical.
+    """
+    try:
+        logo = Image.open(logo_path).convert("RGBA")
+    except Exception as e:
+        raise ValueError(f"Could not read logo: {e}")
+
+    logo_width = max(int(target_width), 1)
+    logo_aspect = logo.width / logo.height
+    logo_height = max(int(logo_width / logo_aspect), 1)
+    logo_resized = logo.resize((logo_width, logo_height), Image.Resampling.LANCZOS)
+
+    if opacity < 1.0:
+        alpha = logo_resized.split()[3]
+        alpha = alpha.point(lambda p: int(p * opacity))
+        logo_resized.putalpha(alpha)
+
+    if white_border:
+        bordered = Image.new(
+            "RGBA",
+            (logo_resized.width + 20, logo_resized.height + 20),
+            (255, 255, 255, 200),
+        )
+        bordered.paste(logo_resized, (10, 10), logo_resized)
+        logo_resized = bordered
+
+    return logo_resized
+
+
+def _resolve_position(position):
+    if isinstance(position, str):
+        return NAMED_POSITIONS.get(position, DEFAULT_POSITION)
+    return position
+
+
+def _clamped_paste_xy(x_frac, y_frac, region_width, region_height, logo_w, logo_h):
+    """
+    Given a desired fractional center position within a region (photo, or a
+    crop box), return the top-left (x, y) pixel to paste the logo at, kept
+    fully inside the region.
+    """
+    half_w_frac = (logo_w / 2) / region_width if region_width else 0
+    half_h_frac = (logo_h / 2) / region_height if region_height else 0
+    x_frac = min(max(x_frac, half_w_frac), 1 - half_w_frac) if region_width > logo_w else 0.5
+    y_frac = min(max(y_frac, half_h_frac), 1 - half_h_frac) if region_height > logo_h else 0.5
+    pos_x = int(x_frac * region_width - logo_w / 2)
+    pos_y = int(y_frac * region_height - logo_h / 2)
+    return pos_x, pos_y
 
 
 # ---------------------------------------------------------------------------
@@ -126,58 +187,83 @@ def add_logo(photo, logo_path, logo_scale=0.15, opacity=1.0,
     photo = photo.convert("RGBA")
     photo_width, photo_height = photo.size
 
-    try:
-        logo = Image.open(logo_path).convert("RGBA")
-    except Exception as e:
-        raise ValueError(f"Could not read logo: {e}")
-
-    logo_width = max(int(photo_width * logo_scale), 1)
-    logo_aspect = logo.width / logo.height
-    logo_height = max(int(logo_width / logo_aspect), 1)
-    logo_resized = logo.resize((logo_width, logo_height), Image.Resampling.LANCZOS)
-
-    if opacity < 1.0:
-        alpha = logo_resized.split()[3]
-        alpha = alpha.point(lambda p: int(p * opacity))
-        logo_resized.putalpha(alpha)
-
-    if white_border:
-        bordered = Image.new(
-            "RGBA",
-            (logo_resized.width + 20, logo_resized.height + 20),
-            (255, 255, 255, 200),
-        )
-        bordered.paste(logo_resized, (10, 10), logo_resized)
-        logo_resized = bordered
-
-    if isinstance(position, str):
-        x_frac, y_frac = NAMED_POSITIONS.get(position, DEFAULT_POSITION)
-    else:
-        x_frac, y_frac = position
-
-    # Clamp so the logo always stays fully inside the photo, even near edges.
-    half_w_frac = (logo_resized.width / 2) / photo_width
-    half_h_frac = (logo_resized.height / 2) / photo_height
-    x_frac = min(max(x_frac, half_w_frac), 1 - half_w_frac) if photo_width > logo_resized.width else 0.5
-    y_frac = min(max(y_frac, half_h_frac), 1 - half_h_frac) if photo_height > logo_resized.height else 0.5
-
-    pos_x = int(x_frac * photo_width - logo_resized.width / 2)
-    pos_y = int(y_frac * photo_height - logo_resized.height / 2)
+    logo_resized = _prepare_logo(logo_path, photo_width * logo_scale, opacity, white_border)
+    x_frac, y_frac = _resolve_position(position)
+    pos_x, pos_y = _clamped_paste_xy(
+        x_frac, y_frac, photo_width, photo_height, logo_resized.width, logo_resized.height
+    )
 
     result = photo.copy()
     result.paste(logo_resized, (pos_x, pos_y), logo_resized)
     return result
 
 
-# ---------------------------------------------------------------------------
-# PREVIEW (used by the GUI, but also handy standalone)
-# ---------------------------------------------------------------------------
+def build_preview_with_overlay(source, logo_path=None, crop_format=None, crop_focus="center",
+                                logo_scale=0.15, opacity=1.0, white_border=False,
+                                position=DEFAULT_POSITION, max_dim=800, dim_strength=0.55):
+    """
+    Build a preview that shows the FULL original photo (nothing cut off),
+    with a highlighted rectangle showing what the crop will keep, and the
+    logo composited at its actual relative position within that rectangle.
+    This is what the GUI's live preview uses, so you always see the whole
+    picture while deciding on framing.
+
+    Args:
+        source: a file path (str/Path) or an already-open PIL.Image
+        max_dim: longest side of the returned preview, in pixels
+        dim_strength: how dark the area outside the crop box is (0-1)
+
+    Returns:
+        (PIL.Image RGBA, crop_rect) where crop_rect is (left, top, width,
+        height) in the RETURNED image's own pixel coordinates — this is
+        the same coordinate space the logo position fraction applies to.
+    """
+    photo = Image.open(source).convert("RGBA") if not isinstance(source, Image.Image) else source.convert("RGBA")
+
+    if max(photo.size) > max_dim:
+        ratio = max_dim / max(photo.size)
+        new_size = (max(int(photo.width * ratio), 1), max(int(photo.height * ratio), 1))
+        photo = photo.resize(new_size, Image.Resampling.LANCZOS)
+
+    if crop_format:
+        crop_box = compute_crop_box(photo.width, photo.height, crop_format, crop_focus)
+        crop_left, crop_top, crop_right, crop_bottom = crop_box
+        crop_w, crop_h = crop_right - crop_left, crop_bottom - crop_top
+
+        # Darken everything outside the crop box so the kept area stands out,
+        # while the full photo stays visible underneath.
+        dim_layer = Image.new("RGBA", photo.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(dim_layer)
+        draw.rectangle([0, 0, photo.width, photo.height], fill=(0, 0, 0, int(255 * dim_strength)))
+        draw.rectangle(crop_box, fill=(0, 0, 0, 0))
+        photo = Image.alpha_composite(photo, dim_layer)
+
+        border_draw = ImageDraw.Draw(photo)
+        border_width = max(2, photo.width // 300)
+        border_draw.rectangle(crop_box, outline=(255, 255, 255, 255), width=border_width)
+    else:
+        crop_left, crop_top, crop_w, crop_h = 0, 0, photo.width, photo.height
+
+    if logo_path and os.path.exists(logo_path):
+        logo_resized = _prepare_logo(logo_path, crop_w * logo_scale, opacity, white_border)
+        x_frac, y_frac = _resolve_position(position)
+        rel_x, rel_y = _clamped_paste_xy(
+            x_frac, y_frac, crop_w, crop_h, logo_resized.width, logo_resized.height
+        )
+        photo.paste(logo_resized, (crop_left + rel_x, crop_top + rel_y), logo_resized)
+
+    return photo, (crop_left, crop_top, crop_w, crop_h)
+
+
 def build_preview(source, logo_path=None, crop_format=None, crop_focus="center",
                    logo_scale=0.15, opacity=1.0, white_border=False,
                    position=DEFAULT_POSITION, max_dim=800):
     """
-    Build a downscaled preview image with crop + logo applied, without
-    touching disk. Fast enough to call on every slider/drag update.
+    Build a downscaled preview image with the crop actually applied (i.e.
+    what the final saved photo will look like, cropped). Fast enough to
+    call on every slider update. For a preview that keeps the full photo
+    visible with a crop-boundary overlay instead, see
+    build_preview_with_overlay().
 
     Args:
         source: a file path (str/Path) or an already-open PIL.Image
