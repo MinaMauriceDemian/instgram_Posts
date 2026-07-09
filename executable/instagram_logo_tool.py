@@ -13,6 +13,9 @@ Requirements:
 QUICK START — scroll down to the "CONFIGURE YOUR SETTINGS HERE"
 section near the bottom of this file and edit the paths/options,
 then just run the script.
+
+For a point-and-click interface with a live preview instead, use
+gui_app.py (in the same folder).
 --------------------------------------------------------------------
 """
 
@@ -35,6 +38,20 @@ INSTAGRAM_FORMATS = {
 
 IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"]
 
+# Logo position is a (x_frac, y_frac) tuple: where the CENTER of the logo
+# sits, as a fraction of the photo's width/height (0.0-1.0). This is what
+# lets the GUI preview support drag-to-reposition — a click at pixel (x, y)
+# on the preview maps directly to a fraction, no matter the photo's real size.
+NAMED_POSITIONS = {
+    "bottom-right": (0.90, 0.90),
+    "bottom-left":  (0.10, 0.90),
+    "top-right":    (0.90, 0.10),
+    "top-left":     (0.10, 0.10),
+    "center":       (0.50, 0.50),
+}
+
+DEFAULT_POSITION = NAMED_POSITIONS["bottom-right"]
+
 
 # ---------------------------------------------------------------------------
 # CROPPING
@@ -49,9 +66,6 @@ def crop_to_instagram_format(image, fmt="square", focus="center"):
         fmt: one of "square", "portrait", "landscape", "story"
         focus: which part of the image to keep when cropping —
                "center" (default), "top", or "bottom".
-               (Top/bottom only matter when cropping height; for width-crops
-               it always centers horizontally, which is right for group/portrait
-               photos where the subject is usually centered left-right.)
 
     Returns:
         Cropped + resized PIL.Image, ready to save.
@@ -89,8 +103,8 @@ def crop_to_instagram_format(image, fmt="square", focus="center"):
 # ---------------------------------------------------------------------------
 # LOGO / WATERMARK
 # ---------------------------------------------------------------------------
-def add_logo(photo, logo_path, logo_scale=0.15, margin_ratio=0.02,
-             opacity=1.0, white_border=False, position="bottom-right"):
+def add_logo(photo, logo_path, logo_scale=0.15, opacity=1.0,
+             white_border=False, position=DEFAULT_POSITION):
     """
     Paste a logo onto a PIL image (RGBA-safe).
 
@@ -98,10 +112,13 @@ def add_logo(photo, logo_path, logo_scale=0.15, margin_ratio=0.02,
         photo: PIL.Image (RGB or RGBA)
         logo_path: path to the logo PNG (should have transparency)
         logo_scale: logo width as a fraction of photo width
-        margin_ratio: margin from the edges as a fraction of photo size
         opacity: 0.0 (invisible) to 1.0 (fully opaque)
-        white_border: add a soft white border/plate behind the logo
-        position: "bottom-right", "bottom-left", "top-right", "top-left", "center"
+        white_border: add a soft white plate behind the logo
+        position: either a named string ("bottom-right", "bottom-left",
+                  "top-right", "top-left", "center") or an (x_frac, y_frac)
+                  tuple giving the CENTER of the logo as a fraction of the
+                  photo's width/height. The logo is automatically kept
+                  fully inside the photo bounds.
 
     Returns:
         New PIL.Image with the logo applied.
@@ -133,19 +150,19 @@ def add_logo(photo, logo_path, logo_scale=0.15, margin_ratio=0.02,
         bordered.paste(logo_resized, (10, 10), logo_resized)
         logo_resized = bordered
 
-    margin_x = int(photo_width * margin_ratio)
-    margin_y = int(photo_height * margin_ratio)
+    if isinstance(position, str):
+        x_frac, y_frac = NAMED_POSITIONS.get(position, DEFAULT_POSITION)
+    else:
+        x_frac, y_frac = position
 
-    positions = {
-        "bottom-right": (photo_width - logo_resized.width - margin_x,
-                          photo_height - logo_resized.height - margin_y),
-        "bottom-left":  (margin_x, photo_height - logo_resized.height - margin_y),
-        "top-right":    (photo_width - logo_resized.width - margin_x, margin_y),
-        "top-left":     (margin_x, margin_y),
-        "center":       ((photo_width - logo_resized.width) // 2,
-                          (photo_height - logo_resized.height) // 2),
-    }
-    pos_x, pos_y = positions.get(position, positions["bottom-right"])
+    # Clamp so the logo always stays fully inside the photo, even near edges.
+    half_w_frac = (logo_resized.width / 2) / photo_width
+    half_h_frac = (logo_resized.height / 2) / photo_height
+    x_frac = min(max(x_frac, half_w_frac), 1 - half_w_frac) if photo_width > logo_resized.width else 0.5
+    y_frac = min(max(y_frac, half_h_frac), 1 - half_h_frac) if photo_height > logo_resized.height else 0.5
+
+    pos_x = int(x_frac * photo_width - logo_resized.width / 2)
+    pos_y = int(y_frac * photo_height - logo_resized.height / 2)
 
     result = photo.copy()
     result.paste(logo_resized, (pos_x, pos_y), logo_resized)
@@ -153,12 +170,59 @@ def add_logo(photo, logo_path, logo_scale=0.15, margin_ratio=0.02,
 
 
 # ---------------------------------------------------------------------------
+# PREVIEW (used by the GUI, but also handy standalone)
+# ---------------------------------------------------------------------------
+def build_preview(source, logo_path=None, crop_format=None, crop_focus="center",
+                   logo_scale=0.15, opacity=1.0, white_border=False,
+                   position=DEFAULT_POSITION, max_dim=800):
+    """
+    Build a downscaled preview image with crop + logo applied, without
+    touching disk. Fast enough to call on every slider/drag update.
+
+    Args:
+        source: a file path (str/Path) or an already-open PIL.Image
+        max_dim: longest side of the returned preview, in pixels
+
+    Returns:
+        PIL.Image (RGBA)
+    """
+    photo = Image.open(source).convert("RGBA") if not isinstance(source, Image.Image) else source.convert("RGBA")
+
+    # Downscale the source before cropping too, just to keep the crop step
+    # fast on huge camera photos. Positioning is fraction-based so this
+    # doesn't change where anything ends up.
+    if max(photo.size) > max_dim * 2:
+        ratio = (max_dim * 2) / max(photo.size)
+        new_size = (max(int(photo.width * ratio), 1), max(int(photo.height * ratio), 1))
+        photo = photo.resize(new_size, Image.Resampling.LANCZOS)
+
+    if crop_format:
+        # Note: this resizes to the exact Instagram pixel size (e.g. 1080px
+        # wide), so we downscale again below to keep preview rendering fast.
+        photo = crop_to_instagram_format(photo, fmt=crop_format, focus=crop_focus)
+
+    if logo_path and os.path.exists(logo_path):
+        photo = add_logo(
+            photo, logo_path,
+            logo_scale=logo_scale, opacity=opacity,
+            white_border=white_border, position=position,
+        )
+
+    if max(photo.size) > max_dim:
+        ratio = max_dim / max(photo.size)
+        new_size = (max(int(photo.width * ratio), 1), max(int(photo.height * ratio), 1))
+        photo = photo.resize(new_size, Image.Resampling.LANCZOS)
+
+    return photo
+
+
+# ---------------------------------------------------------------------------
 # COMBINED PIPELINE (crop + logo) FOR A SINGLE PHOTO
 # ---------------------------------------------------------------------------
 def process_photo(photo_path, logo_path, output_path=None,
                    crop_format=None, crop_focus="center",
-                   logo_scale=0.15, margin_ratio=0.02, opacity=1.0,
-                   white_border=False, logo_position="bottom-right",
+                   logo_scale=0.15, opacity=1.0,
+                   white_border=False, logo_position=DEFAULT_POSITION,
                    jpeg_quality=95):
     """
     Full pipeline: load photo -> (optional) crop to Instagram format ->
@@ -167,6 +231,7 @@ def process_photo(photo_path, logo_path, output_path=None,
     Args:
         crop_format: None (no cropping) or one of
                      "square", "portrait", "landscape", "story"
+        logo_position: named string or (x_frac, y_frac) tuple — see add_logo()
         jpeg_quality: output JPEG quality (1-100), only used for .jpg/.jpeg
 
     Returns:
@@ -174,8 +239,6 @@ def process_photo(photo_path, logo_path, output_path=None,
     """
     photo_path = Path(photo_path)
 
-    # Load with PIL (handles both cropping and pasting cleanly, avoids
-    # repeated BGR<->RGBA conversions)
     photo = Image.open(photo_path).convert("RGBA")
 
     if crop_format:
@@ -185,7 +248,6 @@ def process_photo(photo_path, logo_path, output_path=None,
         photo = add_logo(
             photo, logo_path,
             logo_scale=logo_scale,
-            margin_ratio=margin_ratio,
             opacity=opacity,
             white_border=white_border,
             position=logo_position,
@@ -213,8 +275,8 @@ def process_photo(photo_path, logo_path, output_path=None,
 # ---------------------------------------------------------------------------
 def batch_process(photo_folder, logo_path=None, output_folder=None,
                    crop_format=None, crop_focus="center",
-                   logo_scale=0.15, margin_ratio=0.02, opacity=1.0,
-                   white_border=False, logo_position="bottom-right",
+                   logo_scale=0.15, opacity=1.0,
+                   white_border=False, logo_position=DEFAULT_POSITION,
                    jpeg_quality=95):
     """
     Run process_photo() over every image in a folder.
@@ -263,7 +325,7 @@ def batch_process(photo_folder, logo_path=None, output_folder=None,
             process_photo(
                 photo_path, logo_path, out_path,
                 crop_format=crop_format, crop_focus=crop_focus,
-                logo_scale=logo_scale, margin_ratio=margin_ratio,
+                logo_scale=logo_scale,
                 opacity=opacity, white_border=white_border,
                 logo_position=logo_position, jpeg_quality=jpeg_quality,
             )
@@ -278,7 +340,7 @@ def batch_process(photo_folder, logo_path=None, output_folder=None,
 
 
 # ---------------------------------------------------------------------------
-# OPTIONAL: quick test logo generator (unchanged idea from your original)
+# OPTIONAL: quick test logo generator
 # ---------------------------------------------------------------------------
 def create_test_logo(save_path="test_logo.png"):
     logo = Image.new("RGBA", (400, 150), (255, 255, 255, 0))
@@ -299,7 +361,8 @@ def create_test_logo(save_path="test_logo.png"):
 
 
 # ===========================================================================
-# CONFIGURE YOUR SETTINGS HERE
+# CONFIGURE YOUR SETTINGS HERE  (only used when running this file directly —
+# the GUI app has its own settings screen and doesn't need this edited)
 # ===========================================================================
 if __name__ == "__main__":
 
@@ -309,20 +372,17 @@ if __name__ == "__main__":
     OUTPUT_FOLDER = r"C:\Users\m.malik\Downloads\Instagram_files\Egy_Australia_match\output"
 
     # ----- CROP SETTINGS -----
-    # Choose one: "square", "portrait", "landscape", "story", or None to skip cropping
-    CROP_FORMAT = "portrait"
-    # Which part to keep if the photo is taller than the target ratio: "center", "top", "bottom"
-    CROP_FOCUS = "center"
+    CROP_FORMAT = "portrait"   # "square" / "portrait" / "landscape" / "story" / None
+    CROP_FOCUS = "center"      # "center" / "top" / "bottom"
 
     # ----- LOGO SETTINGS -----
     LOGO_SCALE = 0.17          # logo width as a fraction of photo width
     OPACITY = 1.0              # 0.0 (invisible) to 1.0 (fully opaque)
-    MARGIN_RATIO = 0.02        # margin from edges
     WHITE_BORDER = False
-    LOGO_POSITION = "bottom-right"  # bottom-right / bottom-left / top-right / top-left / center
+    LOGO_POSITION = "bottom-right"  # named position, or e.g. (0.5, 0.5) for exact placement
 
     # ----- OUTPUT QUALITY -----
-    JPEG_QUALITY = 95          # 1-100, higher = better quality / bigger file
+    JPEG_QUALITY = 95
 
     # ----- SAFETY CHECKS -----
     if not os.path.exists(PHOTO_FOLDER):
@@ -341,18 +401,8 @@ if __name__ == "__main__":
         crop_format=CROP_FORMAT,
         crop_focus=CROP_FOCUS,
         logo_scale=LOGO_SCALE,
-        margin_ratio=MARGIN_RATIO,
         opacity=OPACITY,
         white_border=WHITE_BORDER,
         logo_position=LOGO_POSITION,
         jpeg_quality=JPEG_QUALITY,
     )
-
-    # ----- SINGLE-PHOTO EXAMPLE (uncomment to use instead of batch) -----
-    # process_photo(
-    #     photo_path=r"C:\Users\m.malik\Downloads\Instagram_files\photo_2026-07-05_10-32-34.jpg",
-    #     logo_path=LOGO_PATH,
-    #     crop_format="square",
-    #     logo_scale=0.15,
-    #     opacity=0.7,
-    # )
