@@ -3,8 +3,8 @@ REM =====================================================================
 REM  Build script - turns gui_app.py into a standalone Windows .exe
 REM
 REM  HOW TO USE:
-REM   1. Put this file in the SAME folder as gui_app.py and
-REM      instagram_logo_tool.py
+REM   1. Put this file in the SAME folder as gui_app.py,
+REM      instagram_logo_tool.py, and the "fonts" folder.
 REM   2. Double-click this file (build_exe.bat)
 REM   3. Wait for it to finish - it will open the output folder
 REM      automatically when done.
@@ -26,6 +26,13 @@ if errorlevel 1 (
     exit /b 1
 )
 
+if not exist fonts (
+    echo WARNING: "fonts" folder not found next to this script.
+    echo The app will still work, but captions will use a plainer
+    echo system font instead of the bundled bold poster font.
+    echo.
+)
+
 echo [1/4] Installing required packages...
 python -m pip install --upgrade pip >nul
 pip install pillow pyinstaller
@@ -43,10 +50,18 @@ if exist InstagramLogoTool.spec del InstagramLogoTool.spec
 
 echo.
 echo [3/4] Building the .exe (this can take a minute or two)...
-pyinstaller --noconfirm --onefile --windowed ^
-    --name "InstagramLogoTool" ^
-    --hidden-import=PIL._tkinter_finder ^
-    gui_app.py
+if exist fonts (
+    pyinstaller --noconfirm --onefile --windowed ^
+        --name "InstagramLogoTool" ^
+        --hidden-import=PIL._tkinter_finder ^
+        --add-data "fonts;fonts" ^
+        gui_app.py
+) else (
+    pyinstaller --noconfirm --onefile --windowed ^
+        --name "InstagramLogoTool" ^
+        --hidden-import=PIL._tkinter_finder ^
+        gui_app.py
+)
 
 if errorlevel 1 (
     echo.

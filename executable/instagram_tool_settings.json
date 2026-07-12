@@ -15,5 +15,18 @@
     0.9
   ],
   "presets": {},
-  "last_preset": ""
+  "last_preset": "",
+  "caption": {
+    "layout": "side_panel",
+    "bar_color": "#e1031e",
+    "text_color": "#ffffff",
+    "headline": "title",
+    "subtitle": "Subtitle",
+    "bar_ratio": 0.21,
+    "side": "right",
+    "vertical_text": false,
+    "opacity": 0.49
+  },
+  "caption_presets": {},
+  "last_caption_preset": ""
 }

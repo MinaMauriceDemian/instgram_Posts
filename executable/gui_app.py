@@ -2,13 +2,16 @@
 Instagram Logo & Crop Tool — GUI
 ================================
 A simple point-and-click window for instagram_logo_tool.py, with:
-  - A live preview: see the crop + logo before you save anything
+  - A live preview: see the crop + caption + logo before you save anything
   - Drag the logo directly on the preview to reposition it
-  - Named presets (e.g. "Brand A") you can save and reload instantly
+  - A caption/template system: color bar or side panel + headline/subtitle
+    text (like the promo-graphic templates you see on Instagram)
+  - Named presets for both logos and caption templates (e.g. "Brand A")
   - Remembers your last-used folders/settings between sessions
 
 SETUP (one time):
-    1. Keep this file in the SAME folder as "instagram_logo_tool.py".
+    1. Keep this file, "instagram_logo_tool.py", and the "fonts" folder
+       all in the SAME folder.
     2. Install the required library (Command Prompt):
            pip install pillow
        (tkinter comes built-in with Python on Windows, nothing extra needed.)
@@ -24,7 +27,7 @@ import json
 import threading
 import queue
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, colorchooser
 from PIL import Image, ImageTk
 
 # Make sure we can import the processing functions regardless of how the
@@ -60,6 +63,13 @@ CROP_LABELS_REVERSE = {v: k for k, v in CROP_LABELS.items()}
 
 FOCUS_OPTIONS = ["center", "top", "bottom"]
 
+CAPTION_LAYOUT_LABELS = {
+    "No caption/template": None,
+    "Bottom color bar": "bottom_bar",
+    "Side color panel": "side_panel",
+}
+CAPTION_LAYOUT_LABELS_REVERSE = {v: k for k, v in CAPTION_LAYOUT_LABELS.items()}
+
 # ---------------------------------------------------------------------------
 # Settings persistence — saved next to the script (or next to the .exe, if
 # this has been packaged with PyInstaller).
@@ -82,6 +92,19 @@ DEFAULT_CONFIG = {
     "position": list(NAMED_POSITIONS["bottom-right"]),
     "presets": {},
     "last_preset": "",
+    "caption": {
+        "layout": None,
+        "bar_color": "#1a1a1a",
+        "text_color": "#ffffff",
+        "headline": "",
+        "subtitle": "",
+        "bar_ratio": 0.22,
+        "side": "right",
+        "vertical_text": False,
+        "opacity": 1.0,
+    },
+    "caption_presets": {},
+    "last_caption_preset": "",
 }
 
 
@@ -94,10 +117,11 @@ def load_config():
             merged = dict(DEFAULT_CONFIG)
             merged.update(cfg)
             merged["paths"] = {**DEFAULT_CONFIG["paths"], **cfg.get("paths", {})}
+            merged["caption"] = {**DEFAULT_CONFIG["caption"], **cfg.get("caption", {})}
             return merged
         except Exception:
             pass
-    return dict(DEFAULT_CONFIG)
+    return json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
 
 
 def save_config(cfg):
@@ -106,6 +130,16 @@ def save_config(cfg):
             json.dump(cfg, f, indent=2)
     except Exception as e:
         print(f"⚠️ Could not save settings: {e}")
+
+
+def _hex_to_rgb(hexstr):
+    hexstr = (hexstr or "#000000").lstrip("#")
+    if len(hexstr) != 6:
+        return (0, 0, 0)
+    try:
+        return tuple(int(hexstr[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return (0, 0, 0)
 
 
 class LogWriter:
@@ -129,12 +163,13 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Instagram Logo & Crop Tool")
-        self.geometry("1100x720")
-        self.resizable(False, False)
+        self.geometry("1180x900")
+        self.minsize(1100, 700)
 
         self.log_queue = queue.Queue()
         self.config_data = load_config()
         self.presets = dict(self.config_data.get("presets", {}))
+        self.caption_presets = dict(self.config_data.get("caption_presets", {}))
         self.logo_pos = list(self.config_data.get("position", [0.90, 0.90]))
         self._preview_source = None
         self._preview_photo_ref = None
@@ -148,6 +183,7 @@ class App(tk.Tk):
         self._build_ui()
         self._load_config_into_vars()
         self._refresh_preset_dropdown()
+        self._refresh_caption_preset_dropdown()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(150, self._poll_log_queue)
         self._on_input_changed()
@@ -159,8 +195,22 @@ class App(tk.Tk):
         main = ttk.Frame(self)
         main.pack(fill="both", expand=True)
 
-        left = ttk.Frame(main)
-        left.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+        # Scrollable left column (settings can get tall with the caption section)
+        left_container = ttk.Frame(main)
+        left_container.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+
+        left_canvas = tk.Canvas(left_container, highlightthickness=0)
+        left_scroll = ttk.Scrollbar(left_container, orient="vertical", command=left_canvas.yview)
+        left = ttk.Frame(left_canvas)
+        left.bind("<Configure>", lambda e: left_canvas.configure(scrollregion=left_canvas.bbox("all")))
+        left_canvas.create_window((0, 0), window=left, anchor="nw")
+        left_canvas.configure(yscrollcommand=left_scroll.set)
+        left_canvas.pack(side="left", fill="both", expand=True)
+        left_scroll.pack(side="left", fill="y")
+
+        def _on_mousewheel(event):
+            left_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        left_canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
         right = ttk.Frame(main)
         right.pack(side="left", fill="y", padx=10, pady=10)
@@ -196,7 +246,7 @@ class App(tk.Tk):
         ttk.Entry(paths_frame, textvariable=self.output_var, width=48).grid(row=2, column=1, padx=4)
         ttk.Button(paths_frame, text="Browse...", command=self._browse_output).grid(row=2, column=2, padx=6)
 
-        # --- Presets ---
+        # --- Logo presets ---
         preset_frame = ttk.LabelFrame(left, text="Logo Presets (e.g. different brands/accounts)")
         preset_frame.pack(fill="x", pady=(0, 8))
         ttk.Label(preset_frame, text="Preset:").grid(row=0, column=0, sticky="w", padx=8, pady=6)
@@ -225,6 +275,73 @@ class App(tk.Tk):
                                     width=15, state="readonly")
         focus_combo.grid(row=1, column=1, sticky="w", padx=4)
         focus_combo.bind("<<ComboboxSelected>>", self._on_setting_changed)
+
+        # --- Caption / Template ---
+        caption_frame = ttk.LabelFrame(left, text="Caption / Text Template (color bar or panel + text)")
+        caption_frame.pack(fill="x", pady=(0, 8))
+
+        ttk.Label(caption_frame, text="Layout:").grid(row=0, column=0, sticky="w", **pad)
+        self.caption_layout_var = tk.StringVar(value=list(CAPTION_LAYOUT_LABELS.keys())[0])
+        layout_combo = ttk.Combobox(caption_frame, textvariable=self.caption_layout_var,
+                                     values=list(CAPTION_LAYOUT_LABELS.keys()), width=22, state="readonly")
+        layout_combo.grid(row=0, column=1, sticky="w", padx=4)
+        layout_combo.bind("<<ComboboxSelected>>", self._on_setting_changed)
+
+        ttk.Label(caption_frame, text="Side panel: which side / rotate text:").grid(row=0, column=2, sticky="w", padx=(16, 4))
+        self.caption_side_var = tk.StringVar(value="right")
+        side_combo = ttk.Combobox(caption_frame, textvariable=self.caption_side_var,
+                                   values=["left", "right"], width=6, state="readonly")
+        side_combo.grid(row=0, column=3, sticky="w", padx=4)
+        side_combo.bind("<<ComboboxSelected>>", self._on_setting_changed)
+        self.caption_vertical_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(caption_frame, text="Rotate", variable=self.caption_vertical_var,
+                         command=self._on_setting_changed).grid(row=0, column=4, sticky="w", padx=4)
+
+        ttk.Label(caption_frame, text="Headline:").grid(row=1, column=0, sticky="w", **pad)
+        self.caption_headline_var = tk.StringVar(value="")
+        headline_entry = ttk.Entry(caption_frame, textvariable=self.caption_headline_var, width=38)
+        headline_entry.grid(row=1, column=1, columnspan=3, sticky="w", padx=4)
+        headline_entry.bind("<KeyRelease>", self._on_setting_changed)
+
+        ttk.Label(caption_frame, text="Subtitle:").grid(row=2, column=0, sticky="w", **pad)
+        self.caption_subtitle_var = tk.StringVar(value="")
+        subtitle_entry = ttk.Entry(caption_frame, textvariable=self.caption_subtitle_var, width=38)
+        subtitle_entry.grid(row=2, column=1, columnspan=3, sticky="w", padx=4)
+        subtitle_entry.bind("<KeyRelease>", self._on_setting_changed)
+
+        ttk.Label(caption_frame, text="Colors:").grid(row=3, column=0, sticky="w", **pad)
+        self.caption_bar_color = tk.StringVar(value="#1a1a1a")
+        self.bar_color_btn = tk.Button(caption_frame, text="Bar/Panel", width=10,
+                                        bg=self.caption_bar_color.get(), command=self._pick_bar_color)
+        self.bar_color_btn.grid(row=3, column=1, sticky="w", padx=4)
+        self.caption_text_color = tk.StringVar(value="#ffffff")
+        self.text_color_btn = tk.Button(caption_frame, text="Text", width=10,
+                                         bg=self.caption_text_color.get(), command=self._pick_text_color)
+        self.text_color_btn.grid(row=3, column=2, sticky="w", padx=4)
+
+        ttk.Label(caption_frame, text="Bar/panel size (%):").grid(row=4, column=0, sticky="w", **pad)
+        self.caption_bar_ratio_var = tk.IntVar(value=22)
+        ttk.Scale(caption_frame, from_=10, to=45, variable=self.caption_bar_ratio_var, orient="horizontal",
+                  length=160, command=self._on_setting_changed).grid(row=4, column=1, columnspan=2, sticky="w", padx=4)
+        ttk.Label(caption_frame, textvariable=self.caption_bar_ratio_var).grid(row=4, column=3, sticky="w")
+
+        ttk.Label(caption_frame, text="Bar opacity (%):").grid(row=5, column=0, sticky="w", **pad)
+        self.caption_opacity_var = tk.IntVar(value=100)
+        ttk.Scale(caption_frame, from_=40, to=100, variable=self.caption_opacity_var, orient="horizontal",
+                  length=160, command=self._on_setting_changed).grid(row=5, column=1, columnspan=2, sticky="w", padx=4)
+        ttk.Label(caption_frame, textvariable=self.caption_opacity_var).grid(row=5, column=3, sticky="w")
+
+        # Caption/template presets
+        cap_preset_row = ttk.Frame(caption_frame)
+        cap_preset_row.grid(row=6, column=0, columnspan=5, sticky="w", padx=4, pady=(6, 4))
+        ttk.Label(cap_preset_row, text="Template:").pack(side="left", padx=(4, 4))
+        self.caption_preset_var = tk.StringVar()
+        self.caption_preset_combo = ttk.Combobox(cap_preset_row, textvariable=self.caption_preset_var,
+                                                  width=22, state="readonly")
+        self.caption_preset_combo.pack(side="left", padx=4)
+        self.caption_preset_combo.bind("<<ComboboxSelected>>", self._on_caption_preset_selected)
+        ttk.Button(cap_preset_row, text="💾 Save As...", command=self._save_caption_preset).pack(side="left", padx=4)
+        ttk.Button(cap_preset_row, text="🗑 Delete", command=self._delete_caption_preset).pack(side="left", padx=4)
 
         # --- Logo settings ---
         logo_frame = ttk.LabelFrame(left, text="Logo Settings")
@@ -257,7 +374,7 @@ class App(tk.Tk):
         # --- Log output ---
         log_frame = ttk.LabelFrame(left, text="Log")
         log_frame.pack(fill="both", expand=True)
-        self.log_text = tk.Text(log_frame, height=10, state="disabled", wrap="word")
+        self.log_text = tk.Text(log_frame, height=8, state="disabled", wrap="word")
         self.log_text.pack(fill="both", expand=True, padx=6, pady=6)
 
         # --- Preview (right side) ---
@@ -278,6 +395,23 @@ class App(tk.Tk):
                        command=lambda k=key: self._set_named_position(k)).pack(side="left", padx=2)
 
     # ------------------------------------------------------------------
+    # Color pickers
+    # ------------------------------------------------------------------
+    def _pick_bar_color(self):
+        _, hexstr = colorchooser.askcolor(color=self.caption_bar_color.get(), title="Choose bar/panel color")
+        if hexstr:
+            self.caption_bar_color.set(hexstr)
+            self.bar_color_btn.config(bg=hexstr)
+            self._refresh_preview()
+
+    def _pick_text_color(self):
+        _, hexstr = colorchooser.askcolor(color=self.caption_text_color.get(), title="Choose text color")
+        if hexstr:
+            self.caption_text_color.set(hexstr)
+            self.text_color_btn.config(bg=hexstr)
+            self._refresh_preview()
+
+    # ------------------------------------------------------------------
     # Config <-> UI
     # ------------------------------------------------------------------
     def _load_config_into_vars(self):
@@ -295,6 +429,22 @@ class App(tk.Tk):
         if last_preset in self.presets:
             self.preset_var.set(last_preset)
 
+        cap = cfg.get("caption", {})
+        self.caption_layout_var.set(CAPTION_LAYOUT_LABELS_REVERSE.get(cap.get("layout"), list(CAPTION_LAYOUT_LABELS.keys())[0]))
+        self.caption_bar_color.set(cap.get("bar_color", "#1a1a1a"))
+        self.caption_text_color.set(cap.get("text_color", "#ffffff"))
+        self.caption_headline_var.set(cap.get("headline", ""))
+        self.caption_subtitle_var.set(cap.get("subtitle", ""))
+        self.caption_bar_ratio_var.set(round(cap.get("bar_ratio", 0.22) * 100))
+        self.caption_side_var.set(cap.get("side", "right"))
+        self.caption_vertical_var.set(cap.get("vertical_text", False))
+        self.caption_opacity_var.set(round(cap.get("opacity", 1.0) * 100))
+        self.bar_color_btn.config(bg=self.caption_bar_color.get())
+        self.text_color_btn.config(bg=self.caption_text_color.get())
+        last_cap_preset = cfg.get("last_caption_preset", "")
+        if last_cap_preset in self.caption_presets:
+            self.caption_preset_var.set(last_cap_preset)
+
     def _gather_config(self):
         return {
             "paths": {
@@ -311,6 +461,19 @@ class App(tk.Tk):
             "position": list(self.logo_pos),
             "presets": self.presets,
             "last_preset": self.preset_var.get(),
+            "caption": {
+                "layout": CAPTION_LAYOUT_LABELS[self.caption_layout_var.get()],
+                "bar_color": self.caption_bar_color.get(),
+                "text_color": self.caption_text_color.get(),
+                "headline": self.caption_headline_var.get(),
+                "subtitle": self.caption_subtitle_var.get(),
+                "bar_ratio": self.caption_bar_ratio_var.get() / 100.0,
+                "side": self.caption_side_var.get(),
+                "vertical_text": self.caption_vertical_var.get(),
+                "opacity": self.caption_opacity_var.get() / 100.0,
+            },
+            "caption_presets": self.caption_presets,
+            "last_caption_preset": self.caption_preset_var.get(),
         }
 
     def _on_close(self):
@@ -318,7 +481,7 @@ class App(tk.Tk):
         self.destroy()
 
     # ------------------------------------------------------------------
-    # Presets
+    # Logo presets
     # ------------------------------------------------------------------
     def _refresh_preset_dropdown(self):
         self.preset_combo["values"] = list(self.presets.keys())
@@ -335,7 +498,7 @@ class App(tk.Tk):
         self.logo_pos = list(p.get("position", [0.90, 0.90]))
         self._refresh_preview()
 
-    def _ask_preset_name(self):
+    def _ask_text_input(self, title, prompt):
         """
         A small custom "type a name" popup, used instead of tkinter's
         built-in simpledialog — on some Windows setups (high DPI / display
@@ -346,13 +509,13 @@ class App(tk.Tk):
         result = {"value": None}
 
         dialog = tk.Toplevel(self)
-        dialog.title("Save Preset")
+        dialog.title(title)
         dialog.geometry("360x150")
         dialog.resizable(False, False)
         dialog.transient(self)
         dialog.grab_set()
 
-        ttk.Label(dialog, text="Preset name (e.g. 'Brand A'):").pack(padx=16, pady=(20, 6), anchor="w")
+        ttk.Label(dialog, text=prompt).pack(padx=16, pady=(20, 6), anchor="w")
         name_var = tk.StringVar()
         entry = ttk.Entry(dialog, textvariable=name_var, width=40)
         entry.pack(padx=16, pady=(0, 16), fill="x")
@@ -373,7 +536,6 @@ class App(tk.Tk):
         entry.bind("<Return>", on_ok)
         dialog.bind("<Escape>", on_cancel)
 
-        # Center the dialog over the main window
         self.update_idletasks()
         x = self.winfo_x() + (self.winfo_width() // 2) - 180
         y = self.winfo_y() + (self.winfo_height() // 2) - 75
@@ -383,7 +545,7 @@ class App(tk.Tk):
         return result["value"]
 
     def _save_preset(self):
-        name = self._ask_preset_name()
+        name = self._ask_text_input("Save Preset", "Preset name (e.g. 'Brand A'):")
         if not name:
             return
         self.presets[name] = {
@@ -407,6 +569,61 @@ class App(tk.Tk):
             del self.presets[name]
             self._refresh_preset_dropdown()
             self.preset_var.set("")
+            save_config(self._gather_config())
+
+    # ------------------------------------------------------------------
+    # Caption/template presets
+    # ------------------------------------------------------------------
+    def _refresh_caption_preset_dropdown(self):
+        self.caption_preset_combo["values"] = list(self.caption_presets.keys())
+
+    def _on_caption_preset_selected(self, event=None):
+        name = self.caption_preset_var.get()
+        p = self.caption_presets.get(name)
+        if not p:
+            return
+        self.caption_layout_var.set(CAPTION_LAYOUT_LABELS_REVERSE.get(p.get("layout"), list(CAPTION_LAYOUT_LABELS.keys())[0]))
+        self.caption_bar_color.set(p.get("bar_color", "#1a1a1a"))
+        self.caption_text_color.set(p.get("text_color", "#ffffff"))
+        self.caption_headline_var.set(p.get("headline", ""))
+        self.caption_subtitle_var.set(p.get("subtitle", ""))
+        self.caption_bar_ratio_var.set(round(p.get("bar_ratio", 0.22) * 100))
+        self.caption_side_var.set(p.get("side", "right"))
+        self.caption_vertical_var.set(p.get("vertical_text", False))
+        self.caption_opacity_var.set(round(p.get("opacity", 1.0) * 100))
+        self.bar_color_btn.config(bg=self.caption_bar_color.get())
+        self.text_color_btn.config(bg=self.caption_text_color.get())
+        self._refresh_preview()
+
+    def _save_caption_preset(self):
+        name = self._ask_text_input("Save Caption Template", "Template name (e.g. 'Weekend Special'):")
+        if not name:
+            return
+        self.caption_presets[name] = {
+            "layout": CAPTION_LAYOUT_LABELS[self.caption_layout_var.get()],
+            "bar_color": self.caption_bar_color.get(),
+            "text_color": self.caption_text_color.get(),
+            "headline": self.caption_headline_var.get(),
+            "subtitle": self.caption_subtitle_var.get(),
+            "bar_ratio": self.caption_bar_ratio_var.get() / 100.0,
+            "side": self.caption_side_var.get(),
+            "vertical_text": self.caption_vertical_var.get(),
+            "opacity": self.caption_opacity_var.get() / 100.0,
+        }
+        self._refresh_caption_preset_dropdown()
+        self.caption_preset_var.set(name)
+        save_config(self._gather_config())
+        messagebox.showinfo("Saved", f"Caption template '{name}' saved.")
+
+    def _delete_caption_preset(self):
+        name = self.caption_preset_var.get()
+        if not name or name not in self.caption_presets:
+            messagebox.showinfo("No template selected", "Choose a caption template from the dropdown first.")
+            return
+        if messagebox.askyesno("Delete template", f"Delete caption template '{name}'?"):
+            del self.caption_presets[name]
+            self._refresh_caption_preset_dropdown()
+            self.caption_preset_var.set("")
             save_config(self._gather_config())
 
     # ------------------------------------------------------------------
@@ -460,6 +677,22 @@ class App(tk.Tk):
     def _on_setting_changed(self, *_):
         self._refresh_preview()
 
+    def _get_caption_kwargs(self):
+        layout = CAPTION_LAYOUT_LABELS.get(self.caption_layout_var.get())
+        if not layout:
+            return None
+        return dict(
+            layout=layout,
+            bar_color=_hex_to_rgb(self.caption_bar_color.get()),
+            text_color=_hex_to_rgb(self.caption_text_color.get()),
+            headline=self.caption_headline_var.get(),
+            subtitle=self.caption_subtitle_var.get(),
+            bar_ratio=self.caption_bar_ratio_var.get() / 100.0,
+            side=self.caption_side_var.get(),
+            vertical_text=self.caption_vertical_var.get(),
+            opacity=self.caption_opacity_var.get() / 100.0,
+        )
+
     def _load_preview_source(self):
         self._preview_source = None
         path = self.input_var.get().strip()
@@ -506,6 +739,7 @@ class App(tk.Tk):
                 opacity=self.opacity_var.get() / 100.0,
                 white_border=self.border_var.get(),
                 position=tuple(self.logo_pos),
+                caption=self._get_caption_kwargs(),
                 max_dim=self.PREVIEW_W - 20,
             )
         except Exception as e:
@@ -612,6 +846,7 @@ class App(tk.Tk):
             opacity=self.opacity_var.get() / 100.0,
             white_border=self.border_var.get(),
             logo_position=tuple(self.logo_pos),
+            caption=self._get_caption_kwargs(),
         )
 
         self.run_button.config(state="disabled")

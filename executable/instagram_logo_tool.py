@@ -1,8 +1,9 @@
 """
 Instagram Logo & Crop Tool
 ==========================
-Adds a logo/watermark to photos AND crops them to fit Instagram's
-standard aspect ratios (square, portrait, landscape, story).
+Adds a logo/watermark AND a text caption/template (color bar + headline +
+subtitle) to photos, and crops them to fit Instagram's standard aspect
+ratios (square, portrait, landscape, story).
 
 Works on a single photo or a whole folder of photos.
 
@@ -21,13 +22,22 @@ gui_app.py (in the same folder).
 
 from PIL import Image, ImageDraw, ImageFont
 import os
+import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
+# Base directory (works whether this is run as a plain script or bundled
+# into a PyInstaller .exe) — used to find the bundled fonts.
+# ---------------------------------------------------------------------------
+if getattr(sys, "frozen", False):
+    _BASE_DIR = os.path.dirname(sys.executable)
+else:
+    _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+FONTS_DIR = os.path.join(_BASE_DIR, "fonts")
+
+# ---------------------------------------------------------------------------
 # Instagram's recommended output sizes (width, height) in pixels.
-# Cropping first to the matching aspect ratio, then resizing to these exact
-# dimensions, gives the sharpest possible result (no extra re-compression
-# by Instagram itself).
 # ---------------------------------------------------------------------------
 INSTAGRAM_FORMATS = {
     "square":    {"ratio": 1 / 1,    "size": (1080, 1080)},
@@ -39,9 +49,7 @@ INSTAGRAM_FORMATS = {
 IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"]
 
 # Logo position is a (x_frac, y_frac) tuple: where the CENTER of the logo
-# sits, as a fraction of the photo's width/height (0.0-1.0). This is what
-# lets the GUI preview support drag-to-reposition — a click at pixel (x, y)
-# on the preview maps directly to a fraction, no matter the photo's real size.
+# sits, as a fraction of the photo's width/height (0.0-1.0).
 NAMED_POSITIONS = {
     "bottom-right": (0.90, 0.90),
     "bottom-left":  (0.10, 0.90),
@@ -51,6 +59,48 @@ NAMED_POSITIONS = {
 }
 
 DEFAULT_POSITION = NAMED_POSITIONS["bottom-right"]
+
+CAPTION_LAYOUTS = ["bottom_bar", "side_panel"]
+
+
+# ---------------------------------------------------------------------------
+# FONTS
+# ---------------------------------------------------------------------------
+def _font_search_paths(filename):
+    paths = [os.path.join(FONTS_DIR, filename)]
+    meipass = getattr(sys, "_MEIPASS", None)  # PyInstaller onefile extraction dir
+    if meipass:
+        paths.append(os.path.join(meipass, "fonts", filename))
+    return paths
+
+
+def _load_font(filename, size, system_fallbacks=None):
+    size = max(int(size), 1)
+    for p in _font_search_paths(filename):
+        try:
+            if os.path.exists(p):
+                return ImageFont.truetype(p, size)
+        except Exception:
+            continue
+    for name in (system_fallbacks or []):
+        try:
+            return ImageFont.truetype(name, size)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def get_headline_font(size):
+    """Bold poster-style font for captions (bundled 'Anton', falls back to system bold)."""
+    return _load_font("Anton-Regular.ttf", size, ["arialbd.ttf", "Arial Bold.ttf", "arial.ttf"])
+
+
+def get_subtitle_font(size):
+    """Regular-weight font for smaller caption text (bundled 'Open Sans', falls back to system)."""
+    return _load_font("OpenSans-Regular.ttf", size, ["arial.ttf"])
 
 
 # ---------------------------------------------------------------------------
@@ -70,12 +120,10 @@ def compute_crop_box(width, height, fmt, focus="center"):
     current_ratio = width / height
 
     if current_ratio > target_ratio:
-        # Image is too wide -> crop the sides
         new_width = int(height * target_ratio)
         left = (width - new_width) // 2
         return (left, 0, left + new_width, height)
     else:
-        # Image is too tall -> crop top/bottom
         new_height = int(width / target_ratio)
         if focus == "top":
             top = 0
@@ -90,15 +138,6 @@ def crop_to_instagram_format(image, fmt="square", focus="center"):
     """
     Crop a PIL image (RGB/RGBA) to a given Instagram aspect ratio and resize
     it to Instagram's recommended pixel dimensions.
-
-    Args:
-        image: PIL.Image
-        fmt: one of "square", "portrait", "landscape", "story"
-        focus: which part of the image to keep when cropping —
-               "center" (default), "top", or "bottom".
-
-    Returns:
-        Cropped + resized PIL.Image, ready to save.
     """
     target_size = INSTAGRAM_FORMATS[fmt]["size"]
     box = compute_crop_box(image.width, image.height, fmt, focus)
@@ -107,12 +146,10 @@ def crop_to_instagram_format(image, fmt="square", focus="center"):
     return resized
 
 
+# ---------------------------------------------------------------------------
+# SHARED HELPERS
+# ---------------------------------------------------------------------------
 def _prepare_logo(logo_path, target_width, opacity=1.0, white_border=False):
-    """
-    Load a logo, resize it to target_width (keeping aspect ratio), apply
-    opacity, and optionally add a white border/plate. Shared by add_logo()
-    and the preview overlay so both stay visually identical.
-    """
     try:
         logo = Image.open(logo_path).convert("RGBA")
     except Exception as e:
@@ -147,11 +184,6 @@ def _resolve_position(position):
 
 
 def _clamped_paste_xy(x_frac, y_frac, region_width, region_height, logo_w, logo_h):
-    """
-    Given a desired fractional center position within a region (photo, or a
-    crop box), return the top-left (x, y) pixel to paste the logo at, kept
-    fully inside the region.
-    """
     half_w_frac = (logo_w / 2) / region_width if region_width else 0
     half_h_frac = (logo_h / 2) / region_height if region_height else 0
     x_frac = min(max(x_frac, half_w_frac), 1 - half_w_frac) if region_width > logo_w else 0.5
@@ -169,20 +201,8 @@ def add_logo(photo, logo_path, logo_scale=0.15, opacity=1.0,
     """
     Paste a logo onto a PIL image (RGBA-safe).
 
-    Args:
-        photo: PIL.Image (RGB or RGBA)
-        logo_path: path to the logo PNG (should have transparency)
-        logo_scale: logo width as a fraction of photo width
-        opacity: 0.0 (invisible) to 1.0 (fully opaque)
-        white_border: add a soft white plate behind the logo
-        position: either a named string ("bottom-right", "bottom-left",
-                  "top-right", "top-left", "center") or an (x_frac, y_frac)
-                  tuple giving the CENTER of the logo as a fraction of the
-                  photo's width/height. The logo is automatically kept
-                  fully inside the photo bounds.
-
-    Returns:
-        New PIL.Image with the logo applied.
+    position: named string ("bottom-right", etc.) or (x_frac, y_frac) tuple
+              giving the CENTER of the logo as a fraction of the photo.
     """
     photo = photo.convert("RGBA")
     photo_width, photo_height = photo.size
@@ -198,25 +218,171 @@ def add_logo(photo, logo_path, logo_scale=0.15, opacity=1.0,
     return result
 
 
+# ---------------------------------------------------------------------------
+# CAPTION / TEMPLATE (color bar or side panel + headline/subtitle text)
+# ---------------------------------------------------------------------------
+def _draw_wrapped_text(draw, text, font, x, y, max_width, fill, line_spacing=1.15):
+    """Word-wrap text to max_width and draw it, returning the y position after the last line."""
+    if not text:
+        return y
+    words = text.split()
+    lines = []
+    current = ""
+    for word in words:
+        test = (current + " " + word).strip()
+        w_px = draw.textlength(test, font=font)
+        if w_px <= max_width or not current:
+            current = test
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+
+    line_height = getattr(font, "size", 20) * line_spacing
+    cy = y
+    for line in lines:
+        draw.text((x, cy), line, font=font, fill=fill)
+        cy += line_height
+    return cy
+
+
+def _render_rotated_text(text, font, fill, angle=90):
+    """Render text onto a tightly-cropped transparent image, then rotate it (for side panels)."""
+    tmp = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+    tmp_draw = ImageDraw.Draw(tmp)
+    bbox = tmp_draw.textbbox((0, 0), text, font=font)
+    w = max(bbox[2] - bbox[0], 1)
+    h = max(bbox[3] - bbox[1], 1)
+    pad = 6
+    text_img = Image.new("RGBA", (w + pad * 2, h + pad * 2), (0, 0, 0, 0))
+    d = ImageDraw.Draw(text_img)
+    d.text((pad - bbox[0], pad - bbox[1]), text, font=font, fill=fill)
+    return text_img.rotate(angle, expand=True)
+
+
+def build_caption_layer(width, height, layout=None, bar_color=(20, 20, 20),
+                         text_color=(255, 255, 255), headline="", subtitle="",
+                         bar_ratio=0.22, side="right", vertical_text=False, opacity=1.0):
+    """
+    Build a transparent RGBA layer (same size as the target photo) with a
+    color bar/panel and headline/subtitle text drawn on it, ready to be
+    pasted onto a photo. Returns an all-transparent layer if layout is
+    None/"none" so callers don't need to special-case it.
+    """
+    width, height = max(int(width), 1), max(int(height), 1)
+    layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    if not layout or layout == "none":
+        return layer
+
+    draw = ImageDraw.Draw(layer)
+    r, g, b = bar_color[:3]
+    a = int(255 * max(0.0, min(opacity, 1.0)))
+
+    if layout == "bottom_bar":
+        bar_h = max(int(height * bar_ratio), 1)
+        draw.rectangle((0, height - bar_h, width, height), fill=(r, g, b, a))
+
+        pad_x = int(width * 0.05)
+        headline_size = max(int(bar_h * 0.34), 10)
+        subtitle_size = max(int(bar_h * 0.16), 8)
+        hf = get_headline_font(headline_size)
+        sf = get_subtitle_font(subtitle_size)
+
+        text_y = height - bar_h + int(bar_h * 0.16)
+        if headline:
+            draw.text((pad_x, text_y), headline.upper(), font=hf, fill=text_color)
+            text_y += int(headline_size * 1.05) + int(bar_h * 0.06)
+        if subtitle:
+            _draw_wrapped_text(draw, subtitle, sf, pad_x, text_y, width - 2 * pad_x, text_color)
+
+    elif layout == "side_panel":
+        panel_w = max(int(width * bar_ratio), 1)
+        panel_left = 0 if side == "left" else width - panel_w
+        draw.rectangle((panel_left, 0, panel_left + panel_w, height), fill=(r, g, b, a))
+        pad = int(panel_w * 0.14)
+
+        if vertical_text and headline:
+            headline_size = max(int(panel_w * 0.30), 10)
+            hf = get_headline_font(headline_size)
+            rotated = _render_rotated_text(headline.upper(), hf, text_color, angle=90)
+            if rotated.height > height * 0.92:
+                scale = (height * 0.92) / rotated.height
+                rotated = rotated.resize(
+                    (max(int(rotated.width * scale), 1), max(int(rotated.height * scale), 1)),
+                    Image.Resampling.LANCZOS,
+                )
+            rx = panel_left + (panel_w - rotated.width) // 2
+            ry = (height - rotated.height) // 2
+            layer.alpha_composite(rotated, (max(rx, 0), max(ry, 0)))
+            if subtitle:
+                subtitle_size = max(int(panel_w * 0.10), 8)
+                sf = get_subtitle_font(subtitle_size)
+                _draw_wrapped_text(
+                    draw, subtitle, sf, panel_left + pad,
+                    height - int(height * 0.16), panel_w - 2 * pad, text_color,
+                )
+        else:
+            headline_size = max(int(panel_w * 0.17), 10)
+            subtitle_size = max(int(panel_w * 0.10), 8)
+            hf = get_headline_font(headline_size)
+            sf = get_subtitle_font(subtitle_size)
+            y = int(height * 0.08)
+            if headline:
+                y = _draw_wrapped_text(
+                    draw, headline.upper(), hf, panel_left + pad, y,
+                    panel_w - 2 * pad, text_color, line_spacing=1.08,
+                )
+                y += int(panel_w * 0.08)
+            if subtitle:
+                _draw_wrapped_text(draw, subtitle, sf, panel_left + pad, y, panel_w - 2 * pad, text_color)
+
+    return layer
+
+
+def add_caption(photo, layout=None, bar_color=(20, 20, 20), text_color=(255, 255, 255),
+                 headline="", subtitle="", bar_ratio=0.22, side="right",
+                 vertical_text=False, opacity=1.0):
+    """
+    Add a color bar/panel + headline/subtitle text to a photo. Returns the
+    photo unchanged if layout is None/"none".
+    """
+    photo = photo.convert("RGBA").copy()
+    if not layout or layout == "none":
+        return photo
+    layer = build_caption_layer(
+        photo.width, photo.height, layout=layout, bar_color=bar_color,
+        text_color=text_color, headline=headline, subtitle=subtitle,
+        bar_ratio=bar_ratio, side=side, vertical_text=vertical_text, opacity=opacity,
+    )
+    photo.paste(layer, (0, 0), layer)
+    return photo
+
+
+# ---------------------------------------------------------------------------
+# PREVIEW (used by the GUI, but also handy standalone)
+# ---------------------------------------------------------------------------
 def build_preview_with_overlay(source, logo_path=None, crop_format=None, crop_focus="center",
                                 logo_scale=0.15, opacity=1.0, white_border=False,
-                                position=DEFAULT_POSITION, max_dim=800, dim_strength=0.55):
+                                position=DEFAULT_POSITION, caption=None,
+                                max_dim=800, dim_strength=0.55):
     """
     Build a preview that shows the FULL original photo (nothing cut off),
-    with a highlighted rectangle showing what the crop will keep, and the
-    logo composited at its actual relative position within that rectangle.
-    This is what the GUI's live preview uses, so you always see the whole
-    picture while deciding on framing.
+    with a highlighted rectangle showing what the crop will keep, the
+    caption bar/panel (if any), and the logo — both drawn at their actual
+    relative positions within that rectangle.
 
     Args:
         source: a file path (str/Path) or an already-open PIL.Image
+        caption: None, or a dict of build_caption_layer() keyword args
+                 (layout, bar_color, text_color, headline, subtitle,
+                 bar_ratio, side, vertical_text, opacity)
         max_dim: longest side of the returned preview, in pixels
         dim_strength: how dark the area outside the crop box is (0-1)
 
     Returns:
         (PIL.Image RGBA, crop_rect) where crop_rect is (left, top, width,
-        height) in the RETURNED image's own pixel coordinates — this is
-        the same coordinate space the logo position fraction applies to.
+        height) in the RETURNED image's own pixel coordinates.
     """
     photo = Image.open(source).convert("RGBA") if not isinstance(source, Image.Image) else source.convert("RGBA")
 
@@ -230,8 +396,6 @@ def build_preview_with_overlay(source, logo_path=None, crop_format=None, crop_fo
         crop_left, crop_top, crop_right, crop_bottom = crop_box
         crop_w, crop_h = crop_right - crop_left, crop_bottom - crop_top
 
-        # Darken everything outside the crop box so the kept area stands out,
-        # while the full photo stays visible underneath.
         dim_layer = Image.new("RGBA", photo.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(dim_layer)
         draw.rectangle([0, 0, photo.width, photo.height], fill=(0, 0, 0, int(255 * dim_strength)))
@@ -244,6 +408,10 @@ def build_preview_with_overlay(source, logo_path=None, crop_format=None, crop_fo
     else:
         crop_left, crop_top, crop_w, crop_h = 0, 0, photo.width, photo.height
 
+    if caption and caption.get("layout") not in (None, "none"):
+        cap_layer = build_caption_layer(crop_w, crop_h, **caption)
+        photo.paste(cap_layer, (crop_left, crop_top), cap_layer)
+
     if logo_path and os.path.exists(logo_path):
         logo_resized = _prepare_logo(logo_path, crop_w * logo_scale, opacity, white_border)
         x_frac, y_frac = _resolve_position(position)
@@ -255,88 +423,40 @@ def build_preview_with_overlay(source, logo_path=None, crop_format=None, crop_fo
     return photo, (crop_left, crop_top, crop_w, crop_h)
 
 
-def build_preview(source, logo_path=None, crop_format=None, crop_focus="center",
-                   logo_scale=0.15, opacity=1.0, white_border=False,
-                   position=DEFAULT_POSITION, max_dim=800):
-    """
-    Build a downscaled preview image with the crop actually applied (i.e.
-    what the final saved photo will look like, cropped). Fast enough to
-    call on every slider update. For a preview that keeps the full photo
-    visible with a crop-boundary overlay instead, see
-    build_preview_with_overlay().
-
-    Args:
-        source: a file path (str/Path) or an already-open PIL.Image
-        max_dim: longest side of the returned preview, in pixels
-
-    Returns:
-        PIL.Image (RGBA)
-    """
-    photo = Image.open(source).convert("RGBA") if not isinstance(source, Image.Image) else source.convert("RGBA")
-
-    # Downscale the source before cropping too, just to keep the crop step
-    # fast on huge camera photos. Positioning is fraction-based so this
-    # doesn't change where anything ends up.
-    if max(photo.size) > max_dim * 2:
-        ratio = (max_dim * 2) / max(photo.size)
-        new_size = (max(int(photo.width * ratio), 1), max(int(photo.height * ratio), 1))
-        photo = photo.resize(new_size, Image.Resampling.LANCZOS)
-
-    if crop_format:
-        # Note: this resizes to the exact Instagram pixel size (e.g. 1080px
-        # wide), so we downscale again below to keep preview rendering fast.
-        photo = crop_to_instagram_format(photo, fmt=crop_format, focus=crop_focus)
-
-    if logo_path and os.path.exists(logo_path):
-        photo = add_logo(
-            photo, logo_path,
-            logo_scale=logo_scale, opacity=opacity,
-            white_border=white_border, position=position,
-        )
-
-    if max(photo.size) > max_dim:
-        ratio = max_dim / max(photo.size)
-        new_size = (max(int(photo.width * ratio), 1), max(int(photo.height * ratio), 1))
-        photo = photo.resize(new_size, Image.Resampling.LANCZOS)
-
-    return photo
-
-
 # ---------------------------------------------------------------------------
-# COMBINED PIPELINE (crop + logo) FOR A SINGLE PHOTO
+# COMBINED PIPELINE (crop + caption + logo) FOR A SINGLE PHOTO
 # ---------------------------------------------------------------------------
 def process_photo(photo_path, logo_path, output_path=None,
                    crop_format=None, crop_focus="center",
                    logo_scale=0.15, opacity=1.0,
                    white_border=False, logo_position=DEFAULT_POSITION,
-                   jpeg_quality=95):
+                   caption=None, jpeg_quality=95):
     """
-    Full pipeline: load photo -> (optional) crop to Instagram format ->
-    add logo -> save.
+    Full pipeline: load photo -> (optional) crop -> (optional) caption
+    bar/panel -> (optional) logo -> save.
 
     Args:
-        crop_format: None (no cropping) or one of
-                     "square", "portrait", "landscape", "story"
-        logo_position: named string or (x_frac, y_frac) tuple — see add_logo()
+        crop_format: None or one of "square"/"portrait"/"landscape"/"story"
+        caption: None, or a dict of build_caption_layer() keyword args
         jpeg_quality: output JPEG quality (1-100), only used for .jpg/.jpeg
 
     Returns:
         output_path (str)
     """
     photo_path = Path(photo_path)
-
     photo = Image.open(photo_path).convert("RGBA")
 
     if crop_format:
         photo = crop_to_instagram_format(photo, fmt=crop_format, focus=crop_focus)
 
+    if caption and caption.get("layout") not in (None, "none"):
+        photo = add_caption(photo, **caption)
+
     if logo_path:
         photo = add_logo(
             photo, logo_path,
-            logo_scale=logo_scale,
-            opacity=opacity,
-            white_border=white_border,
-            position=logo_position,
+            logo_scale=logo_scale, opacity=opacity,
+            white_border=white_border, position=logo_position,
         )
 
     if output_path is None:
@@ -344,7 +464,6 @@ def process_photo(photo_path, logo_path, output_path=None,
         output_path = str(photo_path.parent / f"{photo_path.stem}{suffix_tag}_ig{photo_path.suffix}")
     output_path = str(output_path)
 
-    # Flatten to RGB for JPEG output (JPEG has no alpha channel)
     if output_path.lower().endswith((".jpg", ".jpeg")):
         flat = Image.new("RGB", photo.size, (255, 255, 255))
         flat.paste(photo, mask=photo.split()[3])
@@ -363,10 +482,8 @@ def batch_process(photo_folder, logo_path=None, output_folder=None,
                    crop_format=None, crop_focus="center",
                    logo_scale=0.15, opacity=1.0,
                    white_border=False, logo_position=DEFAULT_POSITION,
-                   jpeg_quality=95):
-    """
-    Run process_photo() over every image in a folder.
-    """
+                   caption=None, jpeg_quality=95):
+    """Run process_photo() over every image in a folder."""
     photo_folder = Path(photo_folder)
     print("=" * 60)
     print("📸 INSTAGRAM LOGO & CROP TOOL — BATCH MODE")
@@ -374,6 +491,8 @@ def batch_process(photo_folder, logo_path=None, output_folder=None,
     print(f"📁 Input folder : {photo_folder}")
     print(f"🖼️  Logo         : {logo_path or '(none)'}")
     print(f"✂️  Crop format  : {crop_format or '(none — keep original ratio)'}")
+    if caption and caption.get("layout") not in (None, "none"):
+        print(f"🏷️  Caption      : {caption.get('layout')}")
     print(f"📊 Opacity      : {opacity * 100:.0f}%")
     print("-" * 60)
 
@@ -413,7 +532,8 @@ def batch_process(photo_folder, logo_path=None, output_folder=None,
                 crop_format=crop_format, crop_focus=crop_focus,
                 logo_scale=logo_scale,
                 opacity=opacity, white_border=white_border,
-                logo_position=logo_position, jpeg_quality=jpeg_quality,
+                logo_position=logo_position, caption=caption,
+                jpeg_quality=jpeg_quality,
             )
             success += 1
         except Exception as e:
@@ -433,14 +553,10 @@ def create_test_logo(save_path="test_logo.png"):
     draw = ImageDraw.Draw(logo)
     draw.rectangle([10, 10, 390, 140], fill=(41, 128, 185, 220))
     draw.rectangle([10, 10, 390, 140], outline=(255, 255, 255, 200), width=3)
-    try:
-        font = ImageFont.truetype("arial.ttf", 60)
-        font_small = ImageFont.truetype("arial.ttf", 25)
-    except Exception:
-        font = ImageFont.load_default()
-        font_small = ImageFont.load_default()
-    draw.text((50, 40), "MY LOGO", fill=(255, 255, 255, 255), font=font)
-    draw.text((50, 95), "Premium Brand", fill=(255, 255, 255, 200), font=font_small)
+    hf = get_headline_font(50)
+    sf = get_subtitle_font(22)
+    draw.text((30, 35), "MY LOGO", fill=(255, 255, 255, 255), font=hf)
+    draw.text((30, 95), "Premium Brand", fill=(255, 255, 255, 200), font=sf)
     logo.save(save_path, "PNG")
     print(f"✅ Test logo created: {save_path}")
     return save_path
@@ -458,14 +574,27 @@ if __name__ == "__main__":
     OUTPUT_FOLDER = r"C:\Users\m.malik\Downloads\Instagram_files\Egy_Australia_match\output"
 
     # ----- CROP SETTINGS -----
-    CROP_FORMAT = "portrait"   # "square" / "portrait" / "landscape" / "story" / None
-    CROP_FOCUS = "center"      # "center" / "top" / "bottom"
+    CROP_FORMAT = "portrait"
+    CROP_FOCUS = "center"
 
     # ----- LOGO SETTINGS -----
-    LOGO_SCALE = 0.17          # logo width as a fraction of photo width
-    OPACITY = 1.0              # 0.0 (invisible) to 1.0 (fully opaque)
+    LOGO_SCALE = 0.17
+    OPACITY = 1.0
     WHITE_BORDER = False
-    LOGO_POSITION = "bottom-right"  # named position, or e.g. (0.5, 0.5) for exact placement
+    LOGO_POSITION = "bottom-right"
+
+    # ----- CAPTION / TEMPLATE (optional — set CAPTION to None to skip) -----
+    CAPTION = {
+        "layout": "bottom_bar",          # "bottom_bar", "side_panel", or None
+        "bar_color": (20, 20, 20),
+        "text_color": (255, 255, 255),
+        "headline": "MATCH DAY",
+        "subtitle": "Egypt vs Australia — Live from the fan zone",
+        "bar_ratio": 0.22,
+        "side": "right",                 # only used for "side_panel"
+        "vertical_text": False,          # only used for "side_panel"
+        "opacity": 1.0,
+    }
 
     # ----- OUTPUT QUALITY -----
     JPEG_QUALITY = 95
@@ -490,5 +619,6 @@ if __name__ == "__main__":
         opacity=OPACITY,
         white_border=WHITE_BORDER,
         logo_position=LOGO_POSITION,
+        caption=CAPTION,
         jpeg_quality=JPEG_QUALITY,
     )
