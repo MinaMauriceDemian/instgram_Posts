@@ -173,8 +173,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Instagram Logo & Crop Tool")
-        self.geometry("1180x900")
-        self.minsize(1100, 700)
+        self.geometry("1020x680")
+        self.minsize(940, 560)
 
         self.log_queue = queue.Queue()
         self.config_data = load_config()
@@ -205,38 +205,40 @@ class App(tk.Tk):
         main = ttk.Frame(self)
         main.pack(fill="both", expand=True)
 
-        # Scrollable left column (settings can get tall with the caption section)
-        left_container = ttk.Frame(main)
-        left_container.pack(side="left", fill="both", expand=True, padx=10, pady=10)
-
-        left_canvas = tk.Canvas(left_container, highlightthickness=0)
-        left_scroll = ttk.Scrollbar(left_container, orient="vertical", command=left_canvas.yview)
-        left = ttk.Frame(left_canvas)
-        left.bind("<Configure>", lambda e: left_canvas.configure(scrollregion=left_canvas.bbox("all")))
-        left_canvas.create_window((0, 0), window=left, anchor="nw")
-        left_canvas.configure(yscrollcommand=left_scroll.set)
-        left_canvas.pack(side="left", fill="both", expand=True)
-        left_scroll.pack(side="left", fill="y")
-
-        def _on_mousewheel(event):
-            left_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        left_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        left = ttk.Frame(main)
+        left.pack(side="left", fill="both", expand=True, padx=10, pady=10)
 
         right = ttk.Frame(main)
         right.pack(side="left", fill="y", padx=10, pady=10)
 
         pad = {"padx": 8, "pady": 5}
 
-        # --- Mode selector ---
+        # --- Mode selector (stays visible above the tabs — it decides how the
+        #     rest of the app behaves, so it shouldn't be buried in a tab) ---
         mode_frame = ttk.LabelFrame(left, text="What do you want to process?")
         mode_frame.pack(fill="x", pady=(0, 8))
-        ttk.Radiobutton(mode_frame, text="A whole folder of photos", variable=self.mode,
+        ttk.Radiobutton(mode_frame, text="📁 A whole folder of photos", variable=self.mode,
                          value="batch", command=self._on_input_changed).pack(side="left", padx=10, pady=6)
-        ttk.Radiobutton(mode_frame, text="A single photo", variable=self.mode,
+        ttk.Radiobutton(mode_frame, text="🖼 A single photo", variable=self.mode,
                          value="single", command=self._on_input_changed).pack(side="left", padx=10, pady=6)
 
-        # --- Paths ---
-        paths_frame = ttk.LabelFrame(left, text="Files & Folders")
+        # --- Tabbed "taskbar" — each section lives on its own page instead of
+        #     one long scrolling column. ---
+        notebook = ttk.Notebook(left)
+        notebook.pack(fill="both", expand=True, pady=(0, 8))
+
+        source_tab = ttk.Frame(notebook, padding=8)
+        crop_tab = ttk.Frame(notebook, padding=8)
+        caption_tab = ttk.Frame(notebook, padding=8)
+        logo_tab = ttk.Frame(notebook, padding=8)
+
+        notebook.add(source_tab, text="  📂 Files & Presets  ")
+        notebook.add(crop_tab, text="  ✂ Crop & Output  ")
+        notebook.add(caption_tab, text="  🏷 Caption / Template  ")
+        notebook.add(logo_tab, text="  🖋 Logo  ")
+
+        # --- Paths (Files & Presets tab) ---
+        paths_frame = ttk.LabelFrame(source_tab, text="Files & Folders")
         paths_frame.pack(fill="x", pady=(0, 8))
 
         self.input_label = ttk.Label(paths_frame, text="Photo folder:")
@@ -256,8 +258,8 @@ class App(tk.Tk):
         ttk.Entry(paths_frame, textvariable=self.output_var, width=48).grid(row=2, column=1, padx=4)
         ttk.Button(paths_frame, text="Browse...", command=self._browse_output).grid(row=2, column=2, padx=6)
 
-        # --- Logo presets ---
-        preset_frame = ttk.LabelFrame(left, text="Logo Presets (e.g. different brands/accounts)")
+        # --- Logo presets (Files & Presets tab) ---
+        preset_frame = ttk.LabelFrame(source_tab, text="Logo Presets (e.g. different brands/accounts)")
         preset_frame.pack(fill="x", pady=(0, 8))
         ttk.Label(preset_frame, text="Preset:").grid(row=0, column=0, sticky="w", padx=8, pady=6)
         self.preset_var = tk.StringVar()
@@ -268,8 +270,8 @@ class App(tk.Tk):
         ttk.Button(preset_frame, text="💾 Save As...", command=self._save_preset).grid(row=0, column=2, padx=4)
         ttk.Button(preset_frame, text="🗑 Delete", command=self._delete_preset).grid(row=0, column=3, padx=4)
 
-        # --- Crop settings ---
-        crop_frame = ttk.LabelFrame(left, text="Crop for Instagram")
+        # --- Crop settings (Crop & Output tab) ---
+        crop_frame = ttk.LabelFrame(crop_tab, text="Crop for Instagram")
         crop_frame.pack(fill="x", pady=(0, 8))
 
         ttk.Label(crop_frame, text="Format:").grid(row=0, column=0, sticky="w", **pad)
@@ -294,8 +296,8 @@ class App(tk.Tk):
         output_format_combo.grid(row=2, column=1, sticky="w", padx=4)
         output_format_combo.bind("<<ComboboxSelected>>", self._on_setting_changed)
 
-        # --- Caption / Template ---
-        caption_frame = ttk.LabelFrame(left, text="Caption / Text Template (color bar or panel + text)")
+        # --- Caption / Template (Caption / Template tab) ---
+        caption_frame = ttk.LabelFrame(caption_tab, text="Caption / Text Template (color bar or panel + text)")
         caption_frame.pack(fill="x", pady=(0, 8))
 
         ttk.Label(caption_frame, text="Layout:").grid(row=0, column=0, sticky="w", **pad)
@@ -361,8 +363,8 @@ class App(tk.Tk):
         ttk.Button(cap_preset_row, text="💾 Save As...", command=self._save_caption_preset).pack(side="left", padx=4)
         ttk.Button(cap_preset_row, text="🗑 Delete", command=self._delete_caption_preset).pack(side="left", padx=4)
 
-        # --- Logo settings ---
-        logo_frame = ttk.LabelFrame(left, text="Logo Settings")
+        # --- Logo settings (Logo tab) ---
+        logo_frame = ttk.LabelFrame(logo_tab, text="Logo Settings")
         logo_frame.pack(fill="x", pady=(0, 8))
 
         ttk.Label(logo_frame, text="Size (% of photo width):").grid(row=0, column=0, sticky="w", **pad)
