@@ -12,9 +12,10 @@ A simple point-and-click window for instagram_logo_tool.py, with:
 SETUP (one time):
     1. Keep this file, "instagram_logo_tool.py", and the "fonts" folder
        all in the SAME folder.
-    2. Install the required library (Command Prompt):
-           pip install pillow
-       (tkinter comes built-in with Python on Windows, nothing extra needed.)
+    2. Install the required libraries (Command Prompt):
+           pip install pillow pillow-heif
+       (tkinter comes built-in with Python on Windows, nothing extra needed.
+        pillow-heif adds support for iPhone .heic/.heif photos.)
 
 RUN:
     Double-click this file, OR in Command Prompt:
@@ -42,6 +43,7 @@ try:
         create_test_logo,
         NAMED_POSITIONS,
         IMAGE_EXTENSIONS,
+        OUTPUT_FORMAT_CHOICES,
     )
 except ImportError:
     messagebox.showerror(
@@ -70,6 +72,13 @@ CAPTION_LAYOUT_LABELS = {
 }
 CAPTION_LAYOUT_LABELS_REVERSE = {v: k for k, v in CAPTION_LAYOUT_LABELS.items()}
 
+OUTPUT_FORMAT_LABELS = {
+    "JPG (recommended — converts HEIC/etc. too)": "jpg",
+    "Match input file format": "match_input",
+    "PNG (keeps transparency)": "png",
+}
+OUTPUT_FORMAT_LABELS_REVERSE = {v: k for k, v in OUTPUT_FORMAT_LABELS.items()}
+
 # ---------------------------------------------------------------------------
 # Settings persistence — saved next to the script (or next to the .exe, if
 # this has been packaged with PyInstaller).
@@ -86,6 +95,7 @@ DEFAULT_CONFIG = {
     "mode": "batch",
     "crop_format": "portrait",
     "crop_focus": "center",
+    "output_format": "jpg",
     "logo_scale": 0.15,
     "opacity": 1.0,
     "white_border": False,
@@ -276,6 +286,14 @@ class App(tk.Tk):
         focus_combo.grid(row=1, column=1, sticky="w", padx=4)
         focus_combo.bind("<<ComboboxSelected>>", self._on_setting_changed)
 
+        ttk.Label(crop_frame, text="Save as:").grid(row=2, column=0, sticky="w", **pad)
+        self.output_format_var = tk.StringVar(value=list(OUTPUT_FORMAT_LABELS.keys())[0])
+        output_format_combo = ttk.Combobox(crop_frame, textvariable=self.output_format_var,
+                                            values=list(OUTPUT_FORMAT_LABELS.keys()),
+                                            width=38, state="readonly")
+        output_format_combo.grid(row=2, column=1, sticky="w", padx=4)
+        output_format_combo.bind("<<ComboboxSelected>>", self._on_setting_changed)
+
         # --- Caption / Template ---
         caption_frame = ttk.LabelFrame(left, text="Caption / Text Template (color bar or panel + text)")
         caption_frame.pack(fill="x", pady=(0, 8))
@@ -421,6 +439,9 @@ class App(tk.Tk):
         self.output_var.set(cfg["paths"].get("output", ""))
         self.crop_var.set(CROP_LABELS_REVERSE.get(cfg.get("crop_format"), list(CROP_LABELS.keys())[0]))
         self.focus_var.set(cfg.get("crop_focus", "center"))
+        self.output_format_var.set(
+            OUTPUT_FORMAT_LABELS_REVERSE.get(cfg.get("output_format", "jpg"), list(OUTPUT_FORMAT_LABELS.keys())[0])
+        )
         self.scale_var.set(round(cfg.get("logo_scale", 0.15) * 100))
         self.opacity_var.set(round(cfg.get("opacity", 1.0) * 100))
         self.border_var.set(cfg.get("white_border", False))
@@ -455,6 +476,7 @@ class App(tk.Tk):
             "mode": self.mode.get(),
             "crop_format": CROP_LABELS[self.crop_var.get()],
             "crop_focus": self.focus_var.get(),
+            "output_format": OUTPUT_FORMAT_LABELS[self.output_format_var.get()],
             "logo_scale": self.scale_var.get() / 100.0,
             "opacity": self.opacity_var.get() / 100.0,
             "white_border": self.border_var.get(),
@@ -643,7 +665,7 @@ class App(tk.Tk):
         else:
             path = filedialog.askopenfilename(
                 title="Select photo",
-                filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp *.tiff *.webp")],
+                filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp *.tiff *.webp *.heic *.heif")],
             )
         if path:
             self.input_var.set(path)
@@ -842,6 +864,7 @@ class App(tk.Tk):
         settings = dict(
             crop_format=CROP_LABELS[self.crop_var.get()],
             crop_focus=self.focus_var.get(),
+            output_format=OUTPUT_FORMAT_LABELS[self.output_format_var.get()],
             logo_scale=self.scale_var.get() / 100.0,
             opacity=self.opacity_var.get() / 100.0,
             white_border=self.border_var.get(),

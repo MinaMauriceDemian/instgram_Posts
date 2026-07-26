@@ -1,12 +1,13 @@
 {
   "paths": {
-    "input": "C:/Users/m.malik/Downloads/Instagram_files/Egy_Australia_match/photo_2026-07-05_10-32-34.jpg",
-    "logo": "C:/Users/m.malik/Downloads/Instagram_files/logo.png",
-    "output": "C:/Users/m.malik/Downloads/Instagram_files/Egy_Australia_match/output/1.jpg"
+    "input": "D:/mory/invitation/Gemini_Generated_Image_bzen3ibzen3ibzen.png",
+    "logo": "C:/Users/lenovo/Downloads/logo whatsapp.png",
+    "output": "D:/mory/invitation/out/1.jpg"
   },
   "mode": "single",
   "crop_format": "square",
   "crop_focus": "center",
+  "output_format": "jpg",
   "logo_scale": 0.15,
   "opacity": 1.0,
   "white_border": false,
@@ -17,7 +18,7 @@
   "presets": {},
   "last_preset": "",
   "caption": {
-    "layout": "side_panel",
+    "layout": null,
     "bar_color": "#e1031e",
     "text_color": "#ffffff",
     "headline": "title",

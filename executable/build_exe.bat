@@ -35,7 +35,7 @@ if not exist fonts (
 
 echo [1/4] Installing required packages...
 python -m pip install --upgrade pip >nul
-pip install pillow pyinstaller
+pip install pillow pillow-heif pyinstaller
 if errorlevel 1 (
     echo ERROR: Failed to install required packages.
     pause
@@ -54,12 +54,14 @@ if exist fonts (
     pyinstaller --noconfirm --onefile --windowed ^
         --name "InstagramLogoTool" ^
         --hidden-import=PIL._tkinter_finder ^
+        --collect-all pillow_heif ^
         --add-data "fonts;fonts" ^
         gui_app.py
 ) else (
     pyinstaller --noconfirm --onefile --windowed ^
         --name "InstagramLogoTool" ^
         --hidden-import=PIL._tkinter_finder ^
+        --collect-all pillow_heif ^
         gui_app.py
 )
 

@@ -26,6 +26,18 @@ import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
+# HEIC/HEIF support (iPhone photos) — Pillow can't open these natively, so
+# we register pillow-heif's opener with Pillow if it's installed.
+#   pip install pillow-heif
+# ---------------------------------------------------------------------------
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+    HEIC_SUPPORTED = True
+except ImportError:
+    HEIC_SUPPORTED = False
+
+# ---------------------------------------------------------------------------
 # Base directory (works whether this is run as a plain script or bundled
 # into a PyInstaller .exe) — used to find the bundled fonts.
 # ---------------------------------------------------------------------------
@@ -46,7 +58,7 @@ INSTAGRAM_FORMATS = {
     "story":     {"ratio": 9 / 16,   "size": (1080, 1920)},
 }
 
-IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"]
+IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp", ".heic", ".heif"]
 
 # Logo position is a (x_frac, y_frac) tuple: where the CENTER of the logo
 # sits, as a fraction of the photo's width/height (0.0-1.0).
@@ -61,6 +73,27 @@ NAMED_POSITIONS = {
 DEFAULT_POSITION = NAMED_POSITIONS["bottom-right"]
 
 CAPTION_LAYOUTS = ["bottom_bar", "side_panel"]
+
+# ---------------------------------------------------------------------------
+# OUTPUT FORMAT — what file type saved photos come out as.
+#   "jpg"          -> always save as .jpg (recommended for HEIC/iPhone photos,
+#                     since HEIC isn't viewable/uploadable most places)
+#   "match_input"  -> keep the same format as the source photo (old behavior)
+#   "png"          -> always save as .png (keeps transparency, larger files)
+# ---------------------------------------------------------------------------
+OUTPUT_FORMAT_CHOICES = ["jpg", "match_input", "png"]
+
+
+def _resolve_output_extension(input_suffix, output_format="jpg"):
+    input_suffix = input_suffix.lower()
+    if output_format == "png":
+        return ".png"
+    if output_format == "match_input":
+        # jpg/jpeg inputs always normalize to .jpg; everything else (including
+        # heic) keeps its original extension.
+        return ".jpg" if input_suffix in (".jpg", ".jpeg") else input_suffix
+    # default: "jpg" — always save as a normal, widely-viewable JPG
+    return ".jpg"
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +463,7 @@ def process_photo(photo_path, logo_path, output_path=None,
                    crop_format=None, crop_focus="center",
                    logo_scale=0.15, opacity=1.0,
                    white_border=False, logo_position=DEFAULT_POSITION,
-                   caption=None, jpeg_quality=95):
+                   caption=None, jpeg_quality=95, output_format="jpg"):
     """
     Full pipeline: load photo -> (optional) crop -> (optional) caption
     bar/panel -> (optional) logo -> save.
@@ -439,6 +472,10 @@ def process_photo(photo_path, logo_path, output_path=None,
         crop_format: None or one of "square"/"portrait"/"landscape"/"story"
         caption: None, or a dict of build_caption_layer() keyword args
         jpeg_quality: output JPEG quality (1-100), only used for .jpg/.jpeg
+        output_format: "jpg" (default, always save as .jpg — recommended for
+            HEIC input), "match_input" (keep source format), or "png".
+            Only applies when output_path isn't explicitly given; an
+            explicit output_path's own extension always wins.
 
     Returns:
         output_path (str)
@@ -461,13 +498,17 @@ def process_photo(photo_path, logo_path, output_path=None,
 
     if output_path is None:
         suffix_tag = f"_{crop_format}" if crop_format else ""
-        output_path = str(photo_path.parent / f"{photo_path.stem}{suffix_tag}_ig{photo_path.suffix}")
+        ext = _resolve_output_extension(photo_path.suffix, output_format)
+        output_path = str(photo_path.parent / f"{photo_path.stem}{suffix_tag}_ig{ext}")
     output_path = str(output_path)
 
-    if output_path.lower().endswith((".jpg", ".jpeg")):
+    if output_path.lower().endswith((".jpg", ".jpeg", ".bmp")):
         flat = Image.new("RGB", photo.size, (255, 255, 255))
         flat.paste(photo, mask=photo.split()[3])
-        flat.save(output_path, "JPEG", quality=jpeg_quality)
+        if output_path.lower().endswith(".bmp"):
+            flat.save(output_path)
+        else:
+            flat.save(output_path, "JPEG", quality=jpeg_quality)
     else:
         photo.save(output_path)
 
@@ -482,7 +523,7 @@ def batch_process(photo_folder, logo_path=None, output_folder=None,
                    crop_format=None, crop_focus="center",
                    logo_scale=0.15, opacity=1.0,
                    white_border=False, logo_position=DEFAULT_POSITION,
-                   caption=None, jpeg_quality=95):
+                   caption=None, jpeg_quality=95, output_format="jpg"):
     """Run process_photo() over every image in a folder."""
     photo_folder = Path(photo_folder)
     print("=" * 60)
@@ -491,6 +532,7 @@ def batch_process(photo_folder, logo_path=None, output_folder=None,
     print(f"📁 Input folder : {photo_folder}")
     print(f"🖼️  Logo         : {logo_path or '(none)'}")
     print(f"✂️  Crop format  : {crop_format or '(none — keep original ratio)'}")
+    print(f"💾 Save as      : {output_format}")
     if caption and caption.get("layout") not in (None, "none"):
         print(f"🏷️  Caption      : {caption.get('layout')}")
     print(f"📊 Opacity      : {opacity * 100:.0f}%")
@@ -509,6 +551,12 @@ def batch_process(photo_folder, logo_path=None, output_folder=None,
         if p.suffix.lower() in IMAGE_EXTENSIONS
     )
 
+    if not HEIC_SUPPORTED and any(p.suffix.lower() in (".heic", ".heif") for p in photo_files):
+        print("⚠️  HEIC/HEIF files found but pillow-heif isn't installed.")
+        print("    Run: pip install pillow-heif")
+        print("    Those files will fail to open until it's installed.")
+        print("-" * 60)
+
     if not photo_files:
         print(f"❌ No image files found in {photo_folder}")
         return
@@ -522,7 +570,7 @@ def batch_process(photo_folder, logo_path=None, output_folder=None,
         try:
             if output_folder:
                 suffix_tag = f"_{crop_format}" if crop_format else ""
-                out_suffix = ".jpg" if photo_path.suffix.lower() in (".jpg", ".jpeg") else photo_path.suffix
+                out_suffix = _resolve_output_extension(photo_path.suffix, output_format)
                 out_path = Path(output_folder) / f"{photo_path.stem}{suffix_tag}_ig{out_suffix}"
             else:
                 out_path = None
@@ -533,7 +581,7 @@ def batch_process(photo_folder, logo_path=None, output_folder=None,
                 logo_scale=logo_scale,
                 opacity=opacity, white_border=white_border,
                 logo_position=logo_position, caption=caption,
-                jpeg_quality=jpeg_quality,
+                jpeg_quality=jpeg_quality, output_format=output_format,
             )
             success += 1
         except Exception as e:
@@ -598,6 +646,7 @@ if __name__ == "__main__":
 
     # ----- OUTPUT QUALITY -----
     JPEG_QUALITY = 95
+    OUTPUT_FORMAT = "jpg"  # "jpg" (always JPG), "match_input", or "png"
 
     # ----- SAFETY CHECKS -----
     if not os.path.exists(PHOTO_FOLDER):
@@ -621,4 +670,5 @@ if __name__ == "__main__":
         logo_position=LOGO_POSITION,
         caption=CAPTION,
         jpeg_quality=JPEG_QUALITY,
+        output_format=OUTPUT_FORMAT,
     )
