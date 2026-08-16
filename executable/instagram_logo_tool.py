@@ -179,6 +179,29 @@ def crop_to_instagram_format(image, fmt="square", focus="center"):
     return resized
 
 
+def rotate_photo(image, degrees=0):
+    """
+    Rotate a photo clockwise by `degrees` before anything else happens to it
+    (crop/caption/logo are all applied after rotation).
+
+    - 90 / 180 / 270: lossless, exact pixel rotation (e.g. fixing a photo
+      that was taken sideways), no resizing or quality loss.
+    - Any other value (e.g. 3, -8, 15): a fine "straighten the horizon"
+      rotation. The canvas expands to fit the whole rotated photo, with
+      transparent corners, so nothing gets cut off.
+    """
+    degrees = float(degrees) % 360
+    if degrees == 0:
+        return image
+    if degrees == 90:
+        return image.transpose(Image.Transpose.ROTATE_270)
+    if degrees == 180:
+        return image.transpose(Image.Transpose.ROTATE_180)
+    if degrees == 270:
+        return image.transpose(Image.Transpose.ROTATE_90)
+    return image.rotate(-degrees, expand=True, resample=Image.Resampling.BICUBIC)
+
+
 # ---------------------------------------------------------------------------
 # SHARED HELPERS
 # ---------------------------------------------------------------------------
@@ -397,7 +420,7 @@ def add_caption(photo, layout=None, bar_color=(20, 20, 20), text_color=(255, 255
 # ---------------------------------------------------------------------------
 def build_preview_with_overlay(source, logo_path=None, crop_format=None, crop_focus="center",
                                 logo_scale=0.15, opacity=1.0, white_border=False,
-                                position=DEFAULT_POSITION, caption=None,
+                                position=DEFAULT_POSITION, caption=None, rotate=0,
                                 max_dim=800, dim_strength=0.55):
     """
     Build a preview that shows the FULL original photo (nothing cut off),
@@ -410,6 +433,8 @@ def build_preview_with_overlay(source, logo_path=None, crop_format=None, crop_fo
         caption: None, or a dict of build_caption_layer() keyword args
                  (layout, bar_color, text_color, headline, subtitle,
                  bar_ratio, side, vertical_text, opacity)
+        rotate: degrees to rotate the photo clockwise before anything else
+                (0/90/180/270 for a quick turn, or any value to straighten)
         max_dim: longest side of the returned preview, in pixels
         dim_strength: how dark the area outside the crop box is (0-1)
 
@@ -418,6 +443,9 @@ def build_preview_with_overlay(source, logo_path=None, crop_format=None, crop_fo
         height) in the RETURNED image's own pixel coordinates.
     """
     photo = Image.open(source).convert("RGBA") if not isinstance(source, Image.Image) else source.convert("RGBA")
+
+    if rotate:
+        photo = rotate_photo(photo, rotate)
 
     if max(photo.size) > max_dim:
         ratio = max_dim / max(photo.size)
@@ -463,14 +491,16 @@ def process_photo(photo_path, logo_path, output_path=None,
                    crop_format=None, crop_focus="center",
                    logo_scale=0.15, opacity=1.0,
                    white_border=False, logo_position=DEFAULT_POSITION,
-                   caption=None, jpeg_quality=95, output_format="jpg"):
+                   caption=None, jpeg_quality=95, output_format="jpg", rotate=0):
     """
-    Full pipeline: load photo -> (optional) crop -> (optional) caption
-    bar/panel -> (optional) logo -> save.
+    Full pipeline: load photo -> (optional) rotate -> (optional) crop ->
+    (optional) caption bar/panel -> (optional) logo -> save.
 
     Args:
         crop_format: None or one of "square"/"portrait"/"landscape"/"story"
         caption: None, or a dict of build_caption_layer() keyword args
+        rotate: degrees to rotate the photo clockwise before anything else
+                (0/90/180/270 for a quick turn, or any value to straighten)
         jpeg_quality: output JPEG quality (1-100), only used for .jpg/.jpeg
         output_format: "jpg" (default, always save as .jpg — recommended for
             HEIC input), "match_input" (keep source format), or "png".
@@ -482,6 +512,9 @@ def process_photo(photo_path, logo_path, output_path=None,
     """
     photo_path = Path(photo_path)
     photo = Image.open(photo_path).convert("RGBA")
+
+    if rotate:
+        photo = rotate_photo(photo, rotate)
 
     if crop_format:
         photo = crop_to_instagram_format(photo, fmt=crop_format, focus=crop_focus)
@@ -523,7 +556,7 @@ def batch_process(photo_folder, logo_path=None, output_folder=None,
                    crop_format=None, crop_focus="center",
                    logo_scale=0.15, opacity=1.0,
                    white_border=False, logo_position=DEFAULT_POSITION,
-                   caption=None, jpeg_quality=95, output_format="jpg"):
+                   caption=None, jpeg_quality=95, output_format="jpg", rotate=0):
     """Run process_photo() over every image in a folder."""
     photo_folder = Path(photo_folder)
     print("=" * 60)
@@ -532,6 +565,8 @@ def batch_process(photo_folder, logo_path=None, output_folder=None,
     print(f"📁 Input folder : {photo_folder}")
     print(f"🖼️  Logo         : {logo_path or '(none)'}")
     print(f"✂️  Crop format  : {crop_format or '(none — keep original ratio)'}")
+    if rotate:
+        print(f"🔄 Rotate       : {rotate}°")
     print(f"💾 Save as      : {output_format}")
     if caption and caption.get("layout") not in (None, "none"):
         print(f"🏷️  Caption      : {caption.get('layout')}")
@@ -582,6 +617,7 @@ def batch_process(photo_folder, logo_path=None, output_folder=None,
                 opacity=opacity, white_border=white_border,
                 logo_position=logo_position, caption=caption,
                 jpeg_quality=jpeg_quality, output_format=output_format,
+                rotate=rotate,
             )
             success += 1
         except Exception as e:

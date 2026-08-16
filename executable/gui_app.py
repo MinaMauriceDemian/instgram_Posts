@@ -189,6 +189,7 @@ class App(tk.Tk):
         self._crop_rect = (0, 0, 0, 0)
 
         self.mode = tk.StringVar(value=self.config_data.get("mode", "batch"))
+        self.rotate_var = tk.IntVar(value=self.config_data.get("rotate", 0))
 
         self._build_ui()
         self._load_config_into_vars()
@@ -295,6 +296,28 @@ class App(tk.Tk):
                                             width=38, state="readonly")
         output_format_combo.grid(row=2, column=1, sticky="w", padx=4)
         output_format_combo.bind("<<ComboboxSelected>>", self._on_setting_changed)
+
+        # --- Rotate (Crop & Output tab) ---
+        rotate_frame = ttk.LabelFrame(crop_tab, text="Rotate")
+        rotate_frame.pack(fill="x", pady=(0, 8))
+
+        turn_row = ttk.Frame(rotate_frame)
+        turn_row.grid(row=0, column=0, columnspan=3, sticky="w", padx=8, pady=(6, 2))
+        ttk.Button(turn_row, text="⟲ Rotate Left 90°", command=lambda: self._quick_rotate(-90)).pack(side="left", padx=(0, 6))
+        ttk.Button(turn_row, text="⟳ Rotate Right 90°", command=lambda: self._quick_rotate(90)).pack(side="left", padx=6)
+        ttk.Button(turn_row, text="↻ 180°", command=lambda: self._quick_rotate(180)).pack(side="left", padx=6)
+        ttk.Button(turn_row, text="Reset", command=self._reset_rotate).pack(side="left", padx=6)
+        self.rotate_label = ttk.Label(turn_row, text="0°", width=6)
+        self.rotate_label.pack(side="left", padx=(10, 0))
+
+        ttk.Label(rotate_frame, text="Straighten (fine tune):").grid(row=1, column=0, sticky="w", **pad)
+        self.fine_rotate_var = tk.DoubleVar(value=self.config_data.get("fine_rotate", 0.0))
+        fine_scale = ttk.Scale(rotate_frame, from_=-15, to=15, orient="horizontal",
+                                variable=self.fine_rotate_var, length=220,
+                                command=lambda _v: self._on_fine_rotate_changed())
+        fine_scale.grid(row=1, column=1, sticky="w", padx=4)
+        self.fine_rotate_label = ttk.Label(rotate_frame, text="0.0°", width=6)
+        self.fine_rotate_label.grid(row=1, column=2, sticky="w")
 
         # --- Caption / Template (Caption / Template tab) ---
         caption_frame = ttk.LabelFrame(caption_tab, text="Caption / Text Template (color bar or panel + text)")
@@ -447,6 +470,10 @@ class App(tk.Tk):
         self.scale_var.set(round(cfg.get("logo_scale", 0.15) * 100))
         self.opacity_var.set(round(cfg.get("opacity", 1.0) * 100))
         self.border_var.set(cfg.get("white_border", False))
+        self.rotate_var.set(cfg.get("rotate", 0))
+        self.fine_rotate_var.set(cfg.get("fine_rotate", 0.0))
+        self.rotate_label.config(text=f"{self.rotate_var.get()}°")
+        self.fine_rotate_label.config(text=f"{self.fine_rotate_var.get():.1f}°")
         self._toggle_mode_labels()
         last_preset = cfg.get("last_preset", "")
         if last_preset in self.presets:
@@ -483,6 +510,8 @@ class App(tk.Tk):
             "opacity": self.opacity_var.get() / 100.0,
             "white_border": self.border_var.get(),
             "position": list(self.logo_pos),
+            "rotate": self.rotate_var.get(),
+            "fine_rotate": self.fine_rotate_var.get(),
             "presets": self.presets,
             "last_preset": self.preset_var.get(),
             "caption": {
@@ -701,6 +730,25 @@ class App(tk.Tk):
     def _on_setting_changed(self, *_):
         self._refresh_preview()
 
+    def _quick_rotate(self, delta):
+        self.rotate_var.set((self.rotate_var.get() + delta) % 360)
+        self.rotate_label.config(text=f"{self.rotate_var.get()}°")
+        self._refresh_preview()
+
+    def _reset_rotate(self):
+        self.rotate_var.set(0)
+        self.fine_rotate_var.set(0.0)
+        self.rotate_label.config(text="0°")
+        self.fine_rotate_label.config(text="0.0°")
+        self._refresh_preview()
+
+    def _on_fine_rotate_changed(self):
+        self.fine_rotate_label.config(text=f"{self.fine_rotate_var.get():.1f}°")
+        self._refresh_preview()
+
+    def _total_rotate(self):
+        return self.rotate_var.get() + self.fine_rotate_var.get()
+
     def _get_caption_kwargs(self):
         layout = CAPTION_LAYOUT_LABELS.get(self.caption_layout_var.get())
         if not layout:
@@ -764,6 +812,7 @@ class App(tk.Tk):
                 white_border=self.border_var.get(),
                 position=tuple(self.logo_pos),
                 caption=self._get_caption_kwargs(),
+                rotate=self._total_rotate(),
                 max_dim=self.PREVIEW_W - 20,
             )
         except Exception as e:
@@ -872,6 +921,7 @@ class App(tk.Tk):
             white_border=self.border_var.get(),
             logo_position=tuple(self.logo_pos),
             caption=self._get_caption_kwargs(),
+            rotate=self._total_rotate(),
         )
 
         self.run_button.config(state="disabled")
