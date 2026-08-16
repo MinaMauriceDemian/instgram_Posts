@@ -1,0 +1,35 @@
+{
+  "paths": {
+    "input": "",
+    "logo": "",
+    "output": ""
+  },
+  "mode": "batch",
+  "crop_format": "portrait",
+  "crop_focus": "center",
+  "output_format": "jpg",
+  "logo_scale": 0.15,
+  "opacity": 1.0,
+  "white_border": false,
+  "position": [
+    0.9,
+    0.9
+  ],
+  "rotate": 0,
+  "fine_rotate": 0.0,
+  "presets": {},
+  "last_preset": "",
+  "caption": {
+    "layout": null,
+    "bar_color": "#1a1a1a",
+    "text_color": "#ffffff",
+    "headline": "",
+    "subtitle": "",
+    "bar_ratio": 0.22,
+    "side": "right",
+    "vertical_text": false,
+    "opacity": 1.0
+  },
+  "caption_presets": {},
+  "last_caption_preset": ""
+}

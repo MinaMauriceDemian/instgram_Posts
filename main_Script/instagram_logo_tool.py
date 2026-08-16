@@ -1,32 +1,55 @@
 """
 Instagram Logo & Crop Tool
 ==========================
-Adds a logo/watermark to photos AND crops them to fit Instagram's
-standard aspect ratios (square, portrait, landscape, story).
+Adds a logo/watermark AND a text caption/template (color bar + headline +
+subtitle) to photos, and crops them to fit Instagram's standard aspect
+ratios (square, portrait, landscape, story).
 
 Works on a single photo or a whole folder of photos.
 
 Requirements:
-    pip install opencv-python pillow numpy
+    pip install pillow
 
 --------------------------------------------------------------------
 QUICK START — scroll down to the "CONFIGURE YOUR SETTINGS HERE"
 section near the bottom of this file and edit the paths/options,
 then just run the script.
+
+For a point-and-click interface with a live preview instead, use
+gui_app.py (in the same folder).
 --------------------------------------------------------------------
 """
 
-import cv2
-import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import os
+import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
+# HEIC/HEIF support (iPhone photos) — Pillow can't open these natively, so
+# we register pillow-heif's opener with Pillow if it's installed.
+#   pip install pillow-heif
+# ---------------------------------------------------------------------------
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+    HEIC_SUPPORTED = True
+except ImportError:
+    HEIC_SUPPORTED = False
+
+# ---------------------------------------------------------------------------
+# Base directory (works whether this is run as a plain script or bundled
+# into a PyInstaller .exe) — used to find the bundled fonts.
+# ---------------------------------------------------------------------------
+if getattr(sys, "frozen", False):
+    _BASE_DIR = os.path.dirname(sys.executable)
+else:
+    _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+FONTS_DIR = os.path.join(_BASE_DIR, "fonts")
+
+# ---------------------------------------------------------------------------
 # Instagram's recommended output sizes (width, height) in pixels.
-# Cropping first to the matching aspect ratio, then resizing to these exact
-# dimensions, gives the sharpest possible result (no extra re-compression
-# by Instagram itself).
 # ---------------------------------------------------------------------------
 INSTAGRAM_FORMATS = {
     "square":    {"ratio": 1 / 1,    "size": (1080, 1080)},
@@ -35,45 +58,105 @@ INSTAGRAM_FORMATS = {
     "story":     {"ratio": 9 / 16,   "size": (1080, 1920)},
 }
 
-IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"]
+IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp", ".heic", ".heif"]
+
+# Logo position is a (x_frac, y_frac) tuple: where the CENTER of the logo
+# sits, as a fraction of the photo's width/height (0.0-1.0).
+NAMED_POSITIONS = {
+    "bottom-right": (0.90, 0.90),
+    "bottom-left":  (0.10, 0.90),
+    "top-right":    (0.90, 0.10),
+    "top-left":     (0.10, 0.10),
+    "center":       (0.50, 0.50),
+}
+
+DEFAULT_POSITION = NAMED_POSITIONS["bottom-right"]
+
+CAPTION_LAYOUTS = ["bottom_bar", "side_panel"]
+
+# ---------------------------------------------------------------------------
+# OUTPUT FORMAT — what file type saved photos come out as.
+#   "jpg"          -> always save as .jpg (recommended for HEIC/iPhone photos,
+#                     since HEIC isn't viewable/uploadable most places)
+#   "match_input"  -> keep the same format as the source photo (old behavior)
+#   "png"          -> always save as .png (keeps transparency, larger files)
+# ---------------------------------------------------------------------------
+OUTPUT_FORMAT_CHOICES = ["jpg", "match_input", "png"]
+
+
+def _resolve_output_extension(input_suffix, output_format="jpg"):
+    input_suffix = input_suffix.lower()
+    if output_format == "png":
+        return ".png"
+    if output_format == "match_input":
+        # jpg/jpeg inputs always normalize to .jpg; everything else (including
+        # heic) keeps its original extension.
+        return ".jpg" if input_suffix in (".jpg", ".jpeg") else input_suffix
+    # default: "jpg" — always save as a normal, widely-viewable JPG
+    return ".jpg"
+
+
+# ---------------------------------------------------------------------------
+# FONTS
+# ---------------------------------------------------------------------------
+def _font_search_paths(filename):
+    paths = [os.path.join(FONTS_DIR, filename)]
+    meipass = getattr(sys, "_MEIPASS", None)  # PyInstaller onefile extraction dir
+    if meipass:
+        paths.append(os.path.join(meipass, "fonts", filename))
+    return paths
+
+
+def _load_font(filename, size, system_fallbacks=None):
+    size = max(int(size), 1)
+    for p in _font_search_paths(filename):
+        try:
+            if os.path.exists(p):
+                return ImageFont.truetype(p, size)
+        except Exception:
+            continue
+    for name in (system_fallbacks or []):
+        try:
+            return ImageFont.truetype(name, size)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def get_headline_font(size):
+    """Bold poster-style font for captions (bundled 'Anton', falls back to system bold)."""
+    return _load_font("Anton-Regular.ttf", size, ["arialbd.ttf", "Arial Bold.ttf", "arial.ttf"])
+
+
+def get_subtitle_font(size):
+    """Regular-weight font for smaller caption text (bundled 'Open Sans', falls back to system)."""
+    return _load_font("OpenSans-Regular.ttf", size, ["arial.ttf"])
 
 
 # ---------------------------------------------------------------------------
 # CROPPING
 # ---------------------------------------------------------------------------
-def crop_to_instagram_format(image, fmt="square", focus="center"):
+def compute_crop_box(width, height, fmt, focus="center"):
     """
-    Crop a PIL image (RGB/RGBA) to a given Instagram aspect ratio and resize
-    it to Instagram's recommended pixel dimensions.
-
-    Args:
-        image: PIL.Image
-        fmt: one of "square", "portrait", "landscape", "story"
-        focus: which part of the image to keep when cropping —
-               "center" (default), "top", or "bottom".
-               (Top/bottom only matter when cropping height; for width-crops
-               it always centers horizontally, which is right for group/portrait
-               photos where the subject is usually centered left-right.)
-
-    Returns:
-        Cropped + resized PIL.Image, ready to save.
+    Work out the crop rectangle (left, top, right, bottom), in the given
+    width/height's own pixel coordinates, for a given Instagram format,
+    without actually cropping anything. Shared by the real crop function
+    and the preview overlay.
     """
     if fmt not in INSTAGRAM_FORMATS:
         raise ValueError(f"Unknown format '{fmt}'. Choose from {list(INSTAGRAM_FORMATS)}")
 
     target_ratio = INSTAGRAM_FORMATS[fmt]["ratio"]
-    target_size = INSTAGRAM_FORMATS[fmt]["size"]
-
-    width, height = image.size
     current_ratio = width / height
 
     if current_ratio > target_ratio:
-        # Image is too wide -> crop the sides
         new_width = int(height * target_ratio)
         left = (width - new_width) // 2
-        box = (left, 0, left + new_width, height)
+        return (left, 0, left + new_width, height)
     else:
-        # Image is too tall -> crop top/bottom
         new_height = int(width / target_ratio)
         if focus == "top":
             top = 0
@@ -81,42 +164,54 @@ def crop_to_instagram_format(image, fmt="square", focus="center"):
             top = height - new_height
         else:  # center
             top = (height - new_height) // 2
-        box = (0, top, width, top + new_height)
+        return (0, top, width, top + new_height)
 
+
+def crop_to_instagram_format(image, fmt="square", focus="center"):
+    """
+    Crop a PIL image (RGB/RGBA) to a given Instagram aspect ratio and resize
+    it to Instagram's recommended pixel dimensions.
+    """
+    target_size = INSTAGRAM_FORMATS[fmt]["size"]
+    box = compute_crop_box(image.width, image.height, fmt, focus)
     cropped = image.crop(box)
     resized = cropped.resize(target_size, Image.Resampling.LANCZOS)
     return resized
 
 
-# ---------------------------------------------------------------------------
-# LOGO / WATERMARK
-# ---------------------------------------------------------------------------
-def add_logo(photo, logo_path, logo_scale=0.15, margin_ratio=0.02,
-             opacity=1.0, white_border=False, position="bottom-right"):
+def rotate_photo(image, degrees=0):
     """
-    Paste a logo onto a PIL image (RGBA-safe).
+    Rotate a photo clockwise by `degrees` before anything else happens to it
+    (crop/caption/logo are all applied after rotation).
 
-    Args:
-        photo: PIL.Image (RGB or RGBA)
-        logo_path: path to the logo PNG (should have transparency)
-        logo_scale: logo width as a fraction of photo width
-        margin_ratio: margin from the edges as a fraction of photo size
-        opacity: 0.0 (invisible) to 1.0 (fully opaque)
-        white_border: add a soft white border/plate behind the logo
-        position: "bottom-right", "bottom-left", "top-right", "top-left", "center"
-
-    Returns:
-        New PIL.Image with the logo applied.
+    - 90 / 180 / 270: lossless, exact pixel rotation (e.g. fixing a photo
+      that was taken sideways), no resizing or quality loss.
+    - Any other value (e.g. 3, -8, 15): a fine "straighten the horizon"
+      rotation. The canvas expands to fit the whole rotated photo, with
+      transparent corners, so nothing gets cut off.
     """
-    photo = photo.convert("RGBA")
-    photo_width, photo_height = photo.size
+    degrees = float(degrees) % 360
+    if degrees == 0:
+        return image
+    if degrees == 90:
+        return image.transpose(Image.Transpose.ROTATE_270)
+    if degrees == 180:
+        return image.transpose(Image.Transpose.ROTATE_180)
+    if degrees == 270:
+        return image.transpose(Image.Transpose.ROTATE_90)
+    return image.rotate(-degrees, expand=True, resample=Image.Resampling.BICUBIC)
 
+
+# ---------------------------------------------------------------------------
+# SHARED HELPERS
+# ---------------------------------------------------------------------------
+def _prepare_logo(logo_path, target_width, opacity=1.0, white_border=False):
     try:
         logo = Image.open(logo_path).convert("RGBA")
     except Exception as e:
         raise ValueError(f"Could not read logo: {e}")
 
-    logo_width = max(int(photo_width * logo_scale), 1)
+    logo_width = max(int(target_width), 1)
     logo_aspect = logo.width / logo.height
     logo_height = max(int(logo_width / logo_aspect), 1)
     logo_resized = logo.resize((logo_width, logo_height), Image.Resampling.LANCZOS)
@@ -135,19 +230,44 @@ def add_logo(photo, logo_path, logo_scale=0.15, margin_ratio=0.02,
         bordered.paste(logo_resized, (10, 10), logo_resized)
         logo_resized = bordered
 
-    margin_x = int(photo_width * margin_ratio)
-    margin_y = int(photo_height * margin_ratio)
+    return logo_resized
 
-    positions = {
-        "bottom-right": (photo_width - logo_resized.width - margin_x,
-                          photo_height - logo_resized.height - margin_y),
-        "bottom-left":  (margin_x, photo_height - logo_resized.height - margin_y),
-        "top-right":    (photo_width - logo_resized.width - margin_x, margin_y),
-        "top-left":     (margin_x, margin_y),
-        "center":       ((photo_width - logo_resized.width) // 2,
-                          (photo_height - logo_resized.height) // 2),
-    }
-    pos_x, pos_y = positions.get(position, positions["bottom-right"])
+
+def _resolve_position(position):
+    if isinstance(position, str):
+        return NAMED_POSITIONS.get(position, DEFAULT_POSITION)
+    return position
+
+
+def _clamped_paste_xy(x_frac, y_frac, region_width, region_height, logo_w, logo_h):
+    half_w_frac = (logo_w / 2) / region_width if region_width else 0
+    half_h_frac = (logo_h / 2) / region_height if region_height else 0
+    x_frac = min(max(x_frac, half_w_frac), 1 - half_w_frac) if region_width > logo_w else 0.5
+    y_frac = min(max(y_frac, half_h_frac), 1 - half_h_frac) if region_height > logo_h else 0.5
+    pos_x = int(x_frac * region_width - logo_w / 2)
+    pos_y = int(y_frac * region_height - logo_h / 2)
+    return pos_x, pos_y
+
+
+# ---------------------------------------------------------------------------
+# LOGO / WATERMARK
+# ---------------------------------------------------------------------------
+def add_logo(photo, logo_path, logo_scale=0.15, opacity=1.0,
+             white_border=False, position=DEFAULT_POSITION):
+    """
+    Paste a logo onto a PIL image (RGBA-safe).
+
+    position: named string ("bottom-right", etc.) or (x_frac, y_frac) tuple
+              giving the CENTER of the logo as a fraction of the photo.
+    """
+    photo = photo.convert("RGBA")
+    photo_width, photo_height = photo.size
+
+    logo_resized = _prepare_logo(logo_path, photo_width * logo_scale, opacity, white_border)
+    x_frac, y_frac = _resolve_position(position)
+    pos_x, pos_y = _clamped_paste_xy(
+        x_frac, y_frac, photo_width, photo_height, logo_resized.width, logo_resized.height
+    )
 
     result = photo.copy()
     result.paste(logo_resized, (pos_x, pos_y), logo_resized)
@@ -155,54 +275,273 @@ def add_logo(photo, logo_path, logo_scale=0.15, margin_ratio=0.02,
 
 
 # ---------------------------------------------------------------------------
-# COMBINED PIPELINE (crop + logo) FOR A SINGLE PHOTO
+# CAPTION / TEMPLATE (color bar or side panel + headline/subtitle text)
+# ---------------------------------------------------------------------------
+def _draw_wrapped_text(draw, text, font, x, y, max_width, fill, line_spacing=1.15):
+    """Word-wrap text to max_width and draw it, returning the y position after the last line."""
+    if not text:
+        return y
+    words = text.split()
+    lines = []
+    current = ""
+    for word in words:
+        test = (current + " " + word).strip()
+        w_px = draw.textlength(test, font=font)
+        if w_px <= max_width or not current:
+            current = test
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+
+    line_height = getattr(font, "size", 20) * line_spacing
+    cy = y
+    for line in lines:
+        draw.text((x, cy), line, font=font, fill=fill)
+        cy += line_height
+    return cy
+
+
+def _render_rotated_text(text, font, fill, angle=90):
+    """Render text onto a tightly-cropped transparent image, then rotate it (for side panels)."""
+    tmp = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+    tmp_draw = ImageDraw.Draw(tmp)
+    bbox = tmp_draw.textbbox((0, 0), text, font=font)
+    w = max(bbox[2] - bbox[0], 1)
+    h = max(bbox[3] - bbox[1], 1)
+    pad = 6
+    text_img = Image.new("RGBA", (w + pad * 2, h + pad * 2), (0, 0, 0, 0))
+    d = ImageDraw.Draw(text_img)
+    d.text((pad - bbox[0], pad - bbox[1]), text, font=font, fill=fill)
+    return text_img.rotate(angle, expand=True)
+
+
+def build_caption_layer(width, height, layout=None, bar_color=(20, 20, 20),
+                         text_color=(255, 255, 255), headline="", subtitle="",
+                         bar_ratio=0.22, side="right", vertical_text=False, opacity=1.0):
+    """
+    Build a transparent RGBA layer (same size as the target photo) with a
+    color bar/panel and headline/subtitle text drawn on it, ready to be
+    pasted onto a photo. Returns an all-transparent layer if layout is
+    None/"none" so callers don't need to special-case it.
+    """
+    width, height = max(int(width), 1), max(int(height), 1)
+    layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    if not layout or layout == "none":
+        return layer
+
+    draw = ImageDraw.Draw(layer)
+    r, g, b = bar_color[:3]
+    a = int(255 * max(0.0, min(opacity, 1.0)))
+
+    if layout == "bottom_bar":
+        bar_h = max(int(height * bar_ratio), 1)
+        draw.rectangle((0, height - bar_h, width, height), fill=(r, g, b, a))
+
+        pad_x = int(width * 0.05)
+        headline_size = max(int(bar_h * 0.34), 10)
+        subtitle_size = max(int(bar_h * 0.16), 8)
+        hf = get_headline_font(headline_size)
+        sf = get_subtitle_font(subtitle_size)
+
+        text_y = height - bar_h + int(bar_h * 0.16)
+        if headline:
+            draw.text((pad_x, text_y), headline.upper(), font=hf, fill=text_color)
+            text_y += int(headline_size * 1.05) + int(bar_h * 0.06)
+        if subtitle:
+            _draw_wrapped_text(draw, subtitle, sf, pad_x, text_y, width - 2 * pad_x, text_color)
+
+    elif layout == "side_panel":
+        panel_w = max(int(width * bar_ratio), 1)
+        panel_left = 0 if side == "left" else width - panel_w
+        draw.rectangle((panel_left, 0, panel_left + panel_w, height), fill=(r, g, b, a))
+        pad = int(panel_w * 0.14)
+
+        if vertical_text and headline:
+            headline_size = max(int(panel_w * 0.30), 10)
+            hf = get_headline_font(headline_size)
+            rotated = _render_rotated_text(headline.upper(), hf, text_color, angle=90)
+            if rotated.height > height * 0.92:
+                scale = (height * 0.92) / rotated.height
+                rotated = rotated.resize(
+                    (max(int(rotated.width * scale), 1), max(int(rotated.height * scale), 1)),
+                    Image.Resampling.LANCZOS,
+                )
+            rx = panel_left + (panel_w - rotated.width) // 2
+            ry = (height - rotated.height) // 2
+            layer.alpha_composite(rotated, (max(rx, 0), max(ry, 0)))
+            if subtitle:
+                subtitle_size = max(int(panel_w * 0.10), 8)
+                sf = get_subtitle_font(subtitle_size)
+                _draw_wrapped_text(
+                    draw, subtitle, sf, panel_left + pad,
+                    height - int(height * 0.16), panel_w - 2 * pad, text_color,
+                )
+        else:
+            headline_size = max(int(panel_w * 0.17), 10)
+            subtitle_size = max(int(panel_w * 0.10), 8)
+            hf = get_headline_font(headline_size)
+            sf = get_subtitle_font(subtitle_size)
+            y = int(height * 0.08)
+            if headline:
+                y = _draw_wrapped_text(
+                    draw, headline.upper(), hf, panel_left + pad, y,
+                    panel_w - 2 * pad, text_color, line_spacing=1.08,
+                )
+                y += int(panel_w * 0.08)
+            if subtitle:
+                _draw_wrapped_text(draw, subtitle, sf, panel_left + pad, y, panel_w - 2 * pad, text_color)
+
+    return layer
+
+
+def add_caption(photo, layout=None, bar_color=(20, 20, 20), text_color=(255, 255, 255),
+                 headline="", subtitle="", bar_ratio=0.22, side="right",
+                 vertical_text=False, opacity=1.0):
+    """
+    Add a color bar/panel + headline/subtitle text to a photo. Returns the
+    photo unchanged if layout is None/"none".
+    """
+    photo = photo.convert("RGBA").copy()
+    if not layout or layout == "none":
+        return photo
+    layer = build_caption_layer(
+        photo.width, photo.height, layout=layout, bar_color=bar_color,
+        text_color=text_color, headline=headline, subtitle=subtitle,
+        bar_ratio=bar_ratio, side=side, vertical_text=vertical_text, opacity=opacity,
+    )
+    photo.paste(layer, (0, 0), layer)
+    return photo
+
+
+# ---------------------------------------------------------------------------
+# PREVIEW (used by the GUI, but also handy standalone)
+# ---------------------------------------------------------------------------
+def build_preview_with_overlay(source, logo_path=None, crop_format=None, crop_focus="center",
+                                logo_scale=0.15, opacity=1.0, white_border=False,
+                                position=DEFAULT_POSITION, caption=None, rotate=0,
+                                max_dim=800, dim_strength=0.55):
+    """
+    Build a preview that shows the FULL original photo (nothing cut off),
+    with a highlighted rectangle showing what the crop will keep, the
+    caption bar/panel (if any), and the logo — both drawn at their actual
+    relative positions within that rectangle.
+
+    Args:
+        source: a file path (str/Path) or an already-open PIL.Image
+        caption: None, or a dict of build_caption_layer() keyword args
+                 (layout, bar_color, text_color, headline, subtitle,
+                 bar_ratio, side, vertical_text, opacity)
+        rotate: degrees to rotate the photo clockwise before anything else
+                (0/90/180/270 for a quick turn, or any value to straighten)
+        max_dim: longest side of the returned preview, in pixels
+        dim_strength: how dark the area outside the crop box is (0-1)
+
+    Returns:
+        (PIL.Image RGBA, crop_rect) where crop_rect is (left, top, width,
+        height) in the RETURNED image's own pixel coordinates.
+    """
+    photo = Image.open(source).convert("RGBA") if not isinstance(source, Image.Image) else source.convert("RGBA")
+
+    if rotate:
+        photo = rotate_photo(photo, rotate)
+
+    if max(photo.size) > max_dim:
+        ratio = max_dim / max(photo.size)
+        new_size = (max(int(photo.width * ratio), 1), max(int(photo.height * ratio), 1))
+        photo = photo.resize(new_size, Image.Resampling.LANCZOS)
+
+    if crop_format:
+        crop_box = compute_crop_box(photo.width, photo.height, crop_format, crop_focus)
+        crop_left, crop_top, crop_right, crop_bottom = crop_box
+        crop_w, crop_h = crop_right - crop_left, crop_bottom - crop_top
+
+        dim_layer = Image.new("RGBA", photo.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(dim_layer)
+        draw.rectangle([0, 0, photo.width, photo.height], fill=(0, 0, 0, int(255 * dim_strength)))
+        draw.rectangle(crop_box, fill=(0, 0, 0, 0))
+        photo = Image.alpha_composite(photo, dim_layer)
+
+        border_draw = ImageDraw.Draw(photo)
+        border_width = max(2, photo.width // 300)
+        border_draw.rectangle(crop_box, outline=(255, 255, 255, 255), width=border_width)
+    else:
+        crop_left, crop_top, crop_w, crop_h = 0, 0, photo.width, photo.height
+
+    if caption and caption.get("layout") not in (None, "none"):
+        cap_layer = build_caption_layer(crop_w, crop_h, **caption)
+        photo.paste(cap_layer, (crop_left, crop_top), cap_layer)
+
+    if logo_path and os.path.exists(logo_path):
+        logo_resized = _prepare_logo(logo_path, crop_w * logo_scale, opacity, white_border)
+        x_frac, y_frac = _resolve_position(position)
+        rel_x, rel_y = _clamped_paste_xy(
+            x_frac, y_frac, crop_w, crop_h, logo_resized.width, logo_resized.height
+        )
+        photo.paste(logo_resized, (crop_left + rel_x, crop_top + rel_y), logo_resized)
+
+    return photo, (crop_left, crop_top, crop_w, crop_h)
+
+
+# ---------------------------------------------------------------------------
+# COMBINED PIPELINE (crop + caption + logo) FOR A SINGLE PHOTO
 # ---------------------------------------------------------------------------
 def process_photo(photo_path, logo_path, output_path=None,
                    crop_format=None, crop_focus="center",
-                   logo_scale=0.15, margin_ratio=0.02, opacity=1.0,
-                   white_border=False, logo_position="bottom-right",
-                   jpeg_quality=95):
+                   logo_scale=0.15, opacity=1.0,
+                   white_border=False, logo_position=DEFAULT_POSITION,
+                   caption=None, jpeg_quality=95, output_format="jpg", rotate=0):
     """
-    Full pipeline: load photo -> (optional) crop to Instagram format ->
-    add logo -> save.
+    Full pipeline: load photo -> (optional) rotate -> (optional) crop ->
+    (optional) caption bar/panel -> (optional) logo -> save.
 
     Args:
-        crop_format: None (no cropping) or one of
-                     "square", "portrait", "landscape", "story"
+        crop_format: None or one of "square"/"portrait"/"landscape"/"story"
+        caption: None, or a dict of build_caption_layer() keyword args
+        rotate: degrees to rotate the photo clockwise before anything else
+                (0/90/180/270 for a quick turn, or any value to straighten)
         jpeg_quality: output JPEG quality (1-100), only used for .jpg/.jpeg
+        output_format: "jpg" (default, always save as .jpg — recommended for
+            HEIC input), "match_input" (keep source format), or "png".
+            Only applies when output_path isn't explicitly given; an
+            explicit output_path's own extension always wins.
 
     Returns:
         output_path (str)
     """
     photo_path = Path(photo_path)
-
-    # Load with PIL (handles both cropping and pasting cleanly, avoids
-    # repeated BGR<->RGBA conversions)
     photo = Image.open(photo_path).convert("RGBA")
+
+    if rotate:
+        photo = rotate_photo(photo, rotate)
 
     if crop_format:
         photo = crop_to_instagram_format(photo, fmt=crop_format, focus=crop_focus)
 
+    if caption and caption.get("layout") not in (None, "none"):
+        photo = add_caption(photo, **caption)
+
     if logo_path:
         photo = add_logo(
             photo, logo_path,
-            logo_scale=logo_scale,
-            margin_ratio=margin_ratio,
-            opacity=opacity,
-            white_border=white_border,
-            position=logo_position,
+            logo_scale=logo_scale, opacity=opacity,
+            white_border=white_border, position=logo_position,
         )
 
     if output_path is None:
         suffix_tag = f"_{crop_format}" if crop_format else ""
-        output_path = str(photo_path.parent / f"{photo_path.stem}{suffix_tag}_ig{photo_path.suffix}")
+        ext = _resolve_output_extension(photo_path.suffix, output_format)
+        output_path = str(photo_path.parent / f"{photo_path.stem}{suffix_tag}_ig{ext}")
     output_path = str(output_path)
 
-    # Flatten to RGB for JPEG output (JPEG has no alpha channel)
-    if output_path.lower().endswith((".jpg", ".jpeg")):
+    if output_path.lower().endswith((".jpg", ".jpeg", ".bmp")):
         flat = Image.new("RGB", photo.size, (255, 255, 255))
         flat.paste(photo, mask=photo.split()[3])
-        flat.save(output_path, "JPEG", quality=jpeg_quality)
+        if output_path.lower().endswith(".bmp"):
+            flat.save(output_path)
+        else:
+            flat.save(output_path, "JPEG", quality=jpeg_quality)
     else:
         photo.save(output_path)
 
@@ -215,12 +554,10 @@ def process_photo(photo_path, logo_path, output_path=None,
 # ---------------------------------------------------------------------------
 def batch_process(photo_folder, logo_path=None, output_folder=None,
                    crop_format=None, crop_focus="center",
-                   logo_scale=0.15, margin_ratio=0.02, opacity=1.0,
-                   white_border=False, logo_position="bottom-right",
-                   jpeg_quality=95):
-    """
-    Run process_photo() over every image in a folder.
-    """
+                   logo_scale=0.15, opacity=1.0,
+                   white_border=False, logo_position=DEFAULT_POSITION,
+                   caption=None, jpeg_quality=95, output_format="jpg", rotate=0):
+    """Run process_photo() over every image in a folder."""
     photo_folder = Path(photo_folder)
     print("=" * 60)
     print("📸 INSTAGRAM LOGO & CROP TOOL — BATCH MODE")
@@ -228,6 +565,11 @@ def batch_process(photo_folder, logo_path=None, output_folder=None,
     print(f"📁 Input folder : {photo_folder}")
     print(f"🖼️  Logo         : {logo_path or '(none)'}")
     print(f"✂️  Crop format  : {crop_format or '(none — keep original ratio)'}")
+    if rotate:
+        print(f"🔄 Rotate       : {rotate}°")
+    print(f"💾 Save as      : {output_format}")
+    if caption and caption.get("layout") not in (None, "none"):
+        print(f"🏷️  Caption      : {caption.get('layout')}")
     print(f"📊 Opacity      : {opacity * 100:.0f}%")
     print("-" * 60)
 
@@ -244,6 +586,12 @@ def batch_process(photo_folder, logo_path=None, output_folder=None,
         if p.suffix.lower() in IMAGE_EXTENSIONS
     )
 
+    if not HEIC_SUPPORTED and any(p.suffix.lower() in (".heic", ".heif") for p in photo_files):
+        print("⚠️  HEIC/HEIF files found but pillow-heif isn't installed.")
+        print("    Run: pip install pillow-heif")
+        print("    Those files will fail to open until it's installed.")
+        print("-" * 60)
+
     if not photo_files:
         print(f"❌ No image files found in {photo_folder}")
         return
@@ -257,7 +605,7 @@ def batch_process(photo_folder, logo_path=None, output_folder=None,
         try:
             if output_folder:
                 suffix_tag = f"_{crop_format}" if crop_format else ""
-                out_suffix = ".jpg" if photo_path.suffix.lower() in (".jpg", ".jpeg") else photo_path.suffix
+                out_suffix = _resolve_output_extension(photo_path.suffix, output_format)
                 out_path = Path(output_folder) / f"{photo_path.stem}{suffix_tag}_ig{out_suffix}"
             else:
                 out_path = None
@@ -265,9 +613,11 @@ def batch_process(photo_folder, logo_path=None, output_folder=None,
             process_photo(
                 photo_path, logo_path, out_path,
                 crop_format=crop_format, crop_focus=crop_focus,
-                logo_scale=logo_scale, margin_ratio=margin_ratio,
+                logo_scale=logo_scale,
                 opacity=opacity, white_border=white_border,
-                logo_position=logo_position, jpeg_quality=jpeg_quality,
+                logo_position=logo_position, caption=caption,
+                jpeg_quality=jpeg_quality, output_format=output_format,
+                rotate=rotate,
             )
             success += 1
         except Exception as e:
@@ -280,28 +630,25 @@ def batch_process(photo_folder, logo_path=None, output_folder=None,
 
 
 # ---------------------------------------------------------------------------
-# OPTIONAL: quick test logo generator (unchanged idea from your original)
+# OPTIONAL: quick test logo generator
 # ---------------------------------------------------------------------------
 def create_test_logo(save_path="test_logo.png"):
     logo = Image.new("RGBA", (400, 150), (255, 255, 255, 0))
     draw = ImageDraw.Draw(logo)
     draw.rectangle([10, 10, 390, 140], fill=(41, 128, 185, 220))
     draw.rectangle([10, 10, 390, 140], outline=(255, 255, 255, 200), width=3)
-    try:
-        font = ImageFont.truetype("arial.ttf", 60)
-        font_small = ImageFont.truetype("arial.ttf", 25)
-    except Exception:
-        font = ImageFont.load_default()
-        font_small = ImageFont.load_default()
-    draw.text((50, 40), "MY LOGO", fill=(255, 255, 255, 255), font=font)
-    draw.text((50, 95), "Premium Brand", fill=(255, 255, 255, 200), font=font_small)
+    hf = get_headline_font(50)
+    sf = get_subtitle_font(22)
+    draw.text((30, 35), "MY LOGO", fill=(255, 255, 255, 255), font=hf)
+    draw.text((30, 95), "Premium Brand", fill=(255, 255, 255, 200), font=sf)
     logo.save(save_path, "PNG")
     print(f"✅ Test logo created: {save_path}")
     return save_path
 
 
 # ===========================================================================
-# CONFIGURE YOUR SETTINGS HERE
+# CONFIGURE YOUR SETTINGS HERE  (only used when running this file directly —
+# the GUI app has its own settings screen and doesn't need this edited)
 # ===========================================================================
 if __name__ == "__main__":
 
@@ -311,20 +658,31 @@ if __name__ == "__main__":
     OUTPUT_FOLDER = r"C:\Users\m.malik\Downloads\Instagram_files\Egy_Australia_match\output"
 
     # ----- CROP SETTINGS -----
-    # Choose one: "square", "portrait", "landscape", "story", or None to skip cropping
     CROP_FORMAT = "portrait"
-    # Which part to keep if the photo is taller than the target ratio: "center", "top", "bottom"
     CROP_FOCUS = "center"
 
     # ----- LOGO SETTINGS -----
-    LOGO_SCALE = 0.17          # logo width as a fraction of photo width
-    OPACITY = 1.0              # 0.0 (invisible) to 1.0 (fully opaque)
-    MARGIN_RATIO = 0.02        # margin from edges
+    LOGO_SCALE = 0.17
+    OPACITY = 1.0
     WHITE_BORDER = False
-    LOGO_POSITION = "bottom-right"  # bottom-right / bottom-left / top-right / top-left / center
+    LOGO_POSITION = "bottom-right"
+
+    # ----- CAPTION / TEMPLATE (optional — set CAPTION to None to skip) -----
+    CAPTION = {
+        "layout": "bottom_bar",          # "bottom_bar", "side_panel", or None
+        "bar_color": (20, 20, 20),
+        "text_color": (255, 255, 255),
+        "headline": "MATCH DAY",
+        "subtitle": "Egypt vs Australia — Live from the fan zone",
+        "bar_ratio": 0.22,
+        "side": "right",                 # only used for "side_panel"
+        "vertical_text": False,          # only used for "side_panel"
+        "opacity": 1.0,
+    }
 
     # ----- OUTPUT QUALITY -----
-    JPEG_QUALITY = 95          # 1-100, higher = better quality / bigger file
+    JPEG_QUALITY = 95
+    OUTPUT_FORMAT = "jpg"  # "jpg" (always JPG), "match_input", or "png"
 
     # ----- SAFETY CHECKS -----
     if not os.path.exists(PHOTO_FOLDER):
@@ -343,18 +701,10 @@ if __name__ == "__main__":
         crop_format=CROP_FORMAT,
         crop_focus=CROP_FOCUS,
         logo_scale=LOGO_SCALE,
-        margin_ratio=MARGIN_RATIO,
         opacity=OPACITY,
         white_border=WHITE_BORDER,
         logo_position=LOGO_POSITION,
+        caption=CAPTION,
         jpeg_quality=JPEG_QUALITY,
+        output_format=OUTPUT_FORMAT,
     )
-
-    # ----- SINGLE-PHOTO EXAMPLE (uncomment to use instead of batch) -----
-    # process_photo(
-    #     photo_path=r"C:\Users\m.malik\Downloads\Instagram_files\photo_2026-07-05_10-32-34.jpg",
-    #     logo_path=LOGO_PATH,
-    #     crop_format="square",
-    #     logo_scale=0.15,
-    #     opacity=0.7,
-    # )

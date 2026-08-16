@@ -35,7 +35,7 @@ if not exist fonts (
 
 echo [1/4] Installing required packages...
 python -m pip install --upgrade pip >nul
-pip install pillow pillow-heif pyinstaller
+python -m pip install pillow pillow-heif pyinstaller
 if errorlevel 1 (
     echo ERROR: Failed to install required packages.
     pause
@@ -51,14 +51,14 @@ if exist InstagramLogoTool.spec del InstagramLogoTool.spec
 echo.
 echo [3/4] Building the .exe (this can take a minute or two)...
 if exist fonts (
-    pyinstaller --noconfirm --onefile --windowed ^
+    python -m PyInstaller --noconfirm --onefile --windowed ^
         --name "InstagramLogoTool" ^
         --hidden-import=PIL._tkinter_finder ^
         --collect-all pillow_heif ^
         --add-data "fonts;fonts" ^
         gui_app.py
 ) else (
-    pyinstaller --noconfirm --onefile --windowed ^
+    python -m PyInstaller --noconfirm --onefile --windowed ^
         --name "InstagramLogoTool" ^
         --hidden-import=PIL._tkinter_finder ^
         --collect-all pillow_heif ^

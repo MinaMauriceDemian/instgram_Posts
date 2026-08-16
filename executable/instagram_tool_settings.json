@@ -1,11 +1,11 @@
 {
   "paths": {
-    "input": "D:/mory/adv/Mango_Day/WhatsApp Image 2026-08-09 at 5.30.04 PM.jpeg",
-    "logo": "D:/mory/adv/logo whatsapp.png",
-    "output": "D:/mory/adv/Mango_Day/2.jpg"
+    "input": "D:/mory/invitation/Gemini_Generated_Image_bzen3ibzen3ibzen.png",
+    "logo": "C:/Users/lenovo/Downloads/logo whatsapp.png",
+    "output": "D:/mory/invitation/out/1.jpg"
   },
   "mode": "single",
-  "crop_format": null,
+  "crop_format": "square",
   "crop_focus": "center",
   "output_format": "jpg",
   "logo_scale": 0.15,
@@ -19,10 +19,10 @@
   "last_preset": "",
   "caption": {
     "layout": null,
-    "bar_color": "#ff8000",
+    "bar_color": "#e1031e",
     "text_color": "#ffffff",
-    "headline": "           Mango Day",
-    "subtitle": "",
+    "headline": "title",
+    "subtitle": "Subtitle",
     "bar_ratio": 0.21,
     "side": "right",
     "vertical_text": false,
